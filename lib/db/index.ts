@@ -5,6 +5,17 @@ import * as schema from './schema';
 let dbInstance: NeonDatabase<typeof schema> | null = null;
 
 /**
+ * Point the app at an already-built Drizzle instance.
+ *
+ * Used by `scripts/check-queries.mts`, which exercises the real query layer
+ * against an in-process Postgres so the hand-written SQL is proven before it can
+ * 500 a live page. Nothing in the application calls this.
+ */
+export function __setDbForTesting(db: unknown): void {
+  dbInstance = db as NeonDatabase<typeof schema>;
+}
+
+/**
  * Lazily create the Drizzle client over Neon's serverless Pool (WebSocket) so
  * interactive transactions work. Reads DATABASE_URL at call time so the module
  * can be imported during build.

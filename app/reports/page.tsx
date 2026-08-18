@@ -1,9 +1,10 @@
 import { ReportForm, type ReportFormClient } from '@/components/report-form';
+import { PieChart } from '@/components/pie-chart';
 import { getSettings, localeOf } from '@/lib/settings';
 import { t } from '@/lib/i18n';
-import { buildReport, getClientsTree } from '@/lib/queries';
+import { buildReport, getClientsTree, reportSessions } from '@/lib/queries';
 import { money, formatDate } from '@/lib/format';
-import { startOfMonthMs } from '@/lib/time';
+import { startOfMonthMs, formatGap, formatTimeOfDay } from '@/lib/time';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,6 +21,7 @@ export default async function ReportsPage({
   const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v) ?? '';
   const clientId = one(sp.clientId);
   const projectId = one(sp.projectId) || null;
+  const allTime = one(sp.allTime) === '1';
   const fromMs = Number(one(sp.from)) || startOfMonthMs(now, s.timezone);
   const toMs = Number(one(sp.to)) || now + 1;
 
@@ -27,23 +29,29 @@ export default async function ReportsPage({
   const clients: ReportFormClient[] = tree.map((c) => ({
     id: c.id,
     name: c.name,
-    projects: c.projects.map((p) => ({ id: p.id, name: p.name })),
+    projects: c.projects.map((p) => ({ id: p.id, name: p.name, caseNumber: p.caseNumber })),
   }));
 
-  const report = clientId ? await buildReport({ clientId, projectId, fromMs, toMs }) : null;
+  const report = clientId ? await buildReport({ clientId, projectId, fromMs, toMs, allTime }) : null;
 
-  const csvHref = report
-    ? `/api/reports/csv?clientId=${clientId}${projectId ? `&projectId=${projectId}` : ''}&from=${fromMs}&to=${toMs}`
-    : '#';
-  const printHref = report
-    ? `/reports/print?clientId=${clientId}${projectId ? `&projectId=${projectId}` : ''}&from=${fromMs}&to=${toMs}`
-    : '#';
+  const qs = new URLSearchParams({ clientId });
+  if (projectId) qs.set('projectId', projectId);
+  if (allTime) qs.set('allTime', '1');
+  else {
+    qs.set('from', String(fromMs));
+    qs.set('to', String(toMs));
+  }
+  const query = qs.toString();
 
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-semibold">{t(locale, 'reports')}</h1>
 
-      <ReportForm clients={clients} locale={locale} initial={{ clientId, projectId: projectId ?? '', fromMs, toMs }} />
+      <ReportForm
+        clients={clients}
+        locale={locale}
+        initial={{ clientId, projectId: projectId ?? '', fromMs, toMs, allTime }}
+      />
 
       {report && (
         <div className="space-y-6">
@@ -51,54 +59,160 @@ export default async function ReportsPage({
             <div>
               <h2 className="text-lg font-semibold">
                 {report.client.name}
-                <span className="text-slate-500"> · {report.project ? report.project.name : t(locale, 'allCases')}</span>
+                <span className="text-slate-500">
+                  {' · '}
+                  {report.project
+                    ? [report.project.caseNumber, report.project.name].filter(Boolean).join(' · ')
+                    : t(locale, 'allCases')}
+                </span>
               </h2>
               <div className="text-xs text-slate-500">
-                {formatDate(report.fromMs, s.timezone, locale)} – {formatDate(report.toMs - 1, s.timezone, locale)}
+                {report.allTime
+                  ? t(locale, 'allTime')
+                  : `${formatDate(report.fromMs, s.timezone, locale)} – ${formatDate(report.toMs - 1, s.timezone, locale)}`}
+                {' · '}
+                {report.sessionCount} {t(locale, 'workSegments')}
               </div>
             </div>
-            <div className="flex gap-2">
-              <a href={csvHref} className="btn-ghost">
+            <div className="flex gap-2 flex-wrap">
+              <a href={`/api/reports/csv?${query}`} className="btn-ghost">
                 ⭳ {t(locale, 'exportCsv')}
               </a>
-              <a href={printHref} target="_blank" className="btn-primary">
+              <a href={`/reports/print?${query}`} target="_blank" className="btn-ghost">
                 🖶 {t(locale, 'print')}
+              </a>
+              <a href={`/api/reports/pdf?${query}`} className="btn-primary">
+                ⭳ {t(locale, 'downloadStatement')}
               </a>
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
-            <Stat label={t(locale, 'totalHours')} value={report.totalHours.toFixed(2)} />
-            <Stat label={t(locale, 'billableHours')} value={report.totalBillable.toFixed(2)} />
+          {/* Headline figures. Actual and billed differ by design — say why, right here. */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Stat label={t(locale, 'actualHours')} value={report.totalHours.toFixed(2)} />
+            <Stat label={t(locale, 'billedHours')} value={report.totalBilledHours.toFixed(2)} />
+            <Stat label={t(locale, 'nonBillableHours')} value={report.totalNonBillableHours.toFixed(2)} muted />
             <Stat label={t(locale, 'amount')} value={money(report.amount, report.currency, locale)} highlight />
           </div>
+          <p className="text-xs text-slate-500 -mt-2">
+            {t(locale, 'roundingNote')} ({t(locale, 'roundingUnit')}: {report.roundIncrementMin}{' '}
+            {t(locale, 'minutes')})
+          </p>
 
-          {report.entries.length === 0 ? (
+          {report.cases.length === 0 ? (
             <p className="text-slate-500">{t(locale, 'noData')}</p>
           ) : (
             <>
+              {/* Where the time went */}
+              <div className="grid gap-4 md:grid-cols-2">
+                <PieChart
+                  title={`${t(locale, 'timeSpent')} — ${t(locale, 'byCase')}`}
+                  centerLabel={t(locale, 'hours')}
+                  otherLabel={locale === 'he' ? 'אחר' : 'Other'}
+                  slices={report.cases.map((c) => ({
+                    label: [c.caseNumber, c.caseName].filter(Boolean).join(' · '),
+                    value: c.hours,
+                  }))}
+                  formatValue={(n) => n.toFixed(2)}
+                />
+                <PieChart
+                  title={`${t(locale, 'timeSpent')} — ${t(locale, 'byTask')}`}
+                  centerLabel={t(locale, 'hours')}
+                  otherLabel={locale === 'he' ? 'אחר' : 'Other'}
+                  slices={report.byTask.map((b) => ({ label: b.label, value: b.hours }))}
+                  formatValue={(n) => n.toFixed(2)}
+                />
+              </div>
+
+              {/* Cases */}
               <section>
-                <h3 className="font-semibold mb-2">{t(locale, 'byTask')}</h3>
+                <h3 className="font-semibold mb-2">{t(locale, 'byCase')}</h3>
                 <Table
-                  head={[t(locale, 'task'), t(locale, 'hours'), t(locale, 'billableHours')]}
-                  rows={report.byTask.map((b) => [b.label, b.hours.toFixed(2), b.billable.toFixed(2)])}
-                  numCols={[1, 2]}
+                  head={[
+                    t(locale, 'case'),
+                    t(locale, 'segments'),
+                    t(locale, 'actualHours'),
+                    t(locale, 'billedHours'),
+                    t(locale, 'amount'),
+                  ]}
+                  rows={report.cases.map((c) => [
+                    [c.caseNumber, c.caseName].filter(Boolean).join(' · '),
+                    String(c.tasks.reduce((n, task) => n + task.sessions.length, 0)),
+                    c.hours.toFixed(2),
+                    c.billedHours.toFixed(2),
+                    money(c.amount, report.currency, locale),
+                  ])}
+                  numCols={[1, 2, 3, 4]}
                 />
               </section>
 
+              {/* Tasks within each case */}
+              {report.cases.map((c) => (
+                <section key={c.projectId}>
+                  <h3 className="font-semibold mb-2">
+                    {t(locale, 'case')}: {[c.caseNumber, c.caseName].filter(Boolean).join(' · ')}
+                  </h3>
+                  <Table
+                    head={[
+                      t(locale, 'task'),
+                      t(locale, 'segments'),
+                      t(locale, 'actualHours'),
+                      t(locale, 'billedHours'),
+                      t(locale, 'amount'),
+                    ]}
+                    rows={c.tasks.map((task) => [
+                      task.nonBillableHours > 0 ? `${task.taskName} · ${t(locale, 'nonBillable')}` : task.taskName,
+                      String(task.sessions.length),
+                      task.hours.toFixed(2),
+                      task.billedHours.toFixed(2),
+                      money(task.amount, report.currency, locale),
+                    ])}
+                    numCols={[1, 2, 3, 4]}
+                  />
+                </section>
+              ))}
+
+              {/* Chronological log, with the breaks made explicit */}
               <section>
-                <h3 className="font-semibold mb-2">{t(locale, 'detailed')}</h3>
-                <Table
-                  head={[t(locale, 'date'), t(locale, 'task'), t(locale, 'description'), t(locale, 'hours'), t(locale, 'billableHours')]}
-                  rows={report.entries.map((e) => [
-                    formatDate(e.startMs, s.timezone, locale),
-                    e.taskName ?? '—',
-                    e.description ?? '',
-                    e.hours.toFixed(2),
-                    e.billable.toFixed(2),
-                  ])}
-                  numCols={[3, 4]}
-                />
+                <h3 className="font-semibold mb-2">{t(locale, 'activityLog')}</h3>
+                <div className="card p-0 overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-slate-900/50 text-slate-400 text-xs">
+                      <tr>
+                        <th className="text-start p-3">{t(locale, 'date')}</th>
+                        <th className="text-start p-3">{t(locale, 'startEnd')}</th>
+                        <th className="text-start p-3">{t(locale, 'task')}</th>
+                        <th className="text-end p-3">{t(locale, 'duration')}</th>
+                        <th className="text-end p-3">{t(locale, 'billedHours')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reportSessions(report).map((row) => {
+                        const se = row.session;
+                        const showGap = se.gapMsBefore != null && se.gapMsBefore >= 60_000;
+                        return (
+                          <tr key={se.id} className="border-t border-slate-800">
+                            <td className="p-3 whitespace-nowrap">{formatDate(se.startMs, s.timezone, locale)}</td>
+                            <td className="p-3 whitespace-nowrap num">
+                              {formatTimeOfDay(se.startMs, s.timezone)}
+                              {se.endMs != null ? `–${formatTimeOfDay(se.endMs, s.timezone)}` : ''}
+                              {showGap && (
+                                <span className="ms-2 text-[11px] text-slate-500">
+                                  ⏸ {formatGap(se.gapMsBefore!)}
+                                </span>
+                              )}
+                            </td>
+                            <td className={`p-3 ${se.billable ? 'text-slate-300' : 'text-slate-500'}`}>
+                              {se.description || row.taskName}
+                            </td>
+                            <td className="p-3 text-end num">{se.hours.toFixed(2)}</td>
+                            <td className="p-3 text-end num">{se.billable ? se.billedHours.toFixed(2) : '—'}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </section>
             </>
           )}
@@ -108,11 +222,25 @@ export default async function ReportsPage({
   );
 }
 
-function Stat({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+function Stat({
+  label,
+  value,
+  highlight,
+  muted,
+}: {
+  label: string;
+  value: string;
+  highlight?: boolean;
+  muted?: boolean;
+}) {
   return (
     <div className="card">
       <div className="text-xs uppercase tracking-wide text-slate-400">{label}</div>
-      <div className={`num text-2xl font-bold mt-1 ${highlight ? 'text-emerald-300' : ''}`}>{value}</div>
+      <div
+        className={`num text-2xl font-bold mt-1 ${highlight ? 'text-emerald-300' : muted ? 'text-slate-500' : ''}`}
+      >
+        {value}
+      </div>
     </div>
   );
 }

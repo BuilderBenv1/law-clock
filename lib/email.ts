@@ -1,6 +1,6 @@
 import { Resend } from 'resend';
-import type { Client, Project, Settings } from './db/schema';
-import type { ReportData } from './queries';
+import type { Client, Settings } from './db/schema';
+import { reportSessions, type ReportData } from './queries';
 import type { Locale } from './i18n';
 import { t, monthLabel } from './i18n';
 import { money, formatDate } from './format';
@@ -15,8 +15,11 @@ function resend(): Resend {
 function fromAddress(): string {
   return process.env.EMAIL_FROM || 'onboarding@resend.dev';
 }
-function esc(s: string): string {
-  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
+function esc(s: string | null | undefined): string {
+  return String(s ?? '').replace(
+    /[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c,
+  );
 }
 function shell(locale: Locale, inner: string): string {
   const dir = locale === 'he' ? 'rtl' : 'ltr';
@@ -24,45 +27,68 @@ function shell(locale: Locale, inner: string): string {
   return `<div dir="${dir}" style="font-family:'Segoe UI',Arial,sans-serif;color:#1a2233;max-width:600px;margin:0 auto;padding:24px;text-align:${align}">${inner}</div>`;
 }
 
+export interface UsageAlertArgs {
+  client: Client;
+  /** Case label, or null when the threshold is client-wide. */
+  scope: string | null;
+  kind: 'hours' | 'amount';
+  value: number;
+  threshold: number;
+  currency: string;
+  settings: Settings;
+  locale: Locale;
+}
+
 /**
- * Notify the client (falling back to the firm) that a case has crossed its
- * logged-hours threshold. Returns the address it was sent to, or null if there
- * was nowhere to send.
+ * Tell the client they have reached a limit they themselves asked to be warned
+ * about. The wording leads with that fact — this is a reminder they requested,
+ * not an unexpected bill — and states the current figure against the threshold.
  */
-export async function sendThresholdAlert(
-  client: Client,
-  project: Project,
-  hours: number,
-  threshold: number,
-  s: Settings,
-  locale: Locale,
-): Promise<string | null> {
+export async function sendUsageAlert(args: UsageAlertArgs): Promise<string | null> {
+  const { client, scope, kind, value, threshold, currency, settings: s, locale } = args;
   const to = client.email || s.reportEmail || s.firmEmail;
   if (!to) return null;
 
+  const fmt = (n: number) => (kind === 'amount' ? money(n, currency, locale) : n.toFixed(2));
+  const scopeHe = scope ? `בתיק <strong>${esc(scope)}</strong>` : 'בכל התיקים המתנהלים עבורך';
+  const scopeEn = scope ? `on <strong>${esc(scope)}</strong>` : 'across all of your matters';
+
   const heBody = `
-    <h2 style="margin:0 0 12px">עדכון שעות בתיק</h2>
+    <h2 style="margin:0 0 12px">${kind === 'amount' ? 'עדכון חיוב' : 'עדכון שעות'}</h2>
     <p>שלום ${esc(client.name)},</p>
-    <p>ברצוננו לעדכן כי מספר השעות שנצברו בתיק <strong>${esc(project.name)}</strong> הגיע ל־<strong>${hours.toFixed(
-      2,
-    )}</strong> שעות (סף ההתראה הוגדר ל־${threshold.toFixed(2)} שעות).</p>
-    <p>נשמח לעמוד לרשותך לכל שאלה או הבהרה.</p>
+    <p>ביקשת לקבל עדכון כאשר ${kind === 'amount' ? 'החיוב' : 'מספר השעות'} ${scopeHe} ${
+      kind === 'amount' ? 'יגיע ל' : 'יגיעו ל'
+    }<strong>${esc(fmt(threshold))}</strong> — זוהי התזכורת.</p>
+    <p style="background:#f4f7ff;border:1px solid #e4ebf7;border-radius:10px;padding:14px 16px;font-size:15px">
+      נכון להיום נצברו <strong>${esc(fmt(value))}</strong>${kind === 'hours' ? ' שעות' : ''}.
+    </p>
+    <p>נשמח לעמוד לרשותך לכל שאלה או הבהרה, ולשלוח פירוט מלא של השעות לפי בקשה.</p>
     <p style="margin-top:20px">בברכה,<br>${esc(s.firmName)}</p>`;
+
   const enBody = `
-    <h2 style="margin:0 0 12px">Case hours update</h2>
+    <h2 style="margin:0 0 12px">${kind === 'amount' ? 'Billing update' : 'Hours update'}</h2>
     <p>Hello ${esc(client.name)},</p>
-    <p>This is to let you know that the hours logged on case <strong>${esc(project.name)}</strong> have reached
-      <strong>${hours.toFixed(2)}</strong> hours (the alert threshold was set at ${threshold.toFixed(2)} hours).</p>
-    <p>Please don't hesitate to reach out with any questions.</p>
+    <p>You asked to be told when ${kind === 'amount' ? 'billing' : 'time'} ${scopeEn} reached
+      <strong>${esc(fmt(threshold))}</strong> — here is that reminder.</p>
+    <p style="background:#f4f7ff;border:1px solid #e4ebf7;border-radius:10px;padding:14px 16px;font-size:15px">
+      The current total is <strong>${esc(fmt(value))}</strong>${kind === 'hours' ? ' hours' : ''}.
+    </p>
+    <p>We are happy to answer any questions, and can send a full breakdown of the hours on request.</p>
     <p style="margin-top:20px">Best regards,<br>${esc(s.firmName)}</p>`;
+
+  const subject =
+    locale === 'he'
+      ? kind === 'amount'
+        ? `עדכון חיוב — ${fmt(value)}${scope ? ` · ${scope}` : ''}`
+        : `עדכון שעות — ${value.toFixed(1)} ש'${scope ? ` · ${scope}` : ''}`
+      : kind === 'amount'
+        ? `Billing update — ${fmt(value)}${scope ? ` · ${scope}` : ''}`
+        : `Hours update — ${value.toFixed(1)}h${scope ? ` · ${scope}` : ''}`;
 
   const { error } = await resend().emails.send({
     from: fromAddress(),
     to,
-    subject:
-      locale === 'he'
-        ? `עדכון שעות — תיק ${project.name} (${hours.toFixed(1)} ש')`
-        : `Case hours update — ${project.name} (${hours.toFixed(1)}h)`,
+    subject,
     html: shell(locale, locale === 'he' ? heBody : enBody),
   });
   if (error) throw new Error(`Resend send failed: ${error.message ?? 'unknown error'}`);
@@ -90,16 +116,16 @@ export interface MonthlyClientReport {
   report: ReportData;
 }
 
-/** Combined CSV across every client's entries for the month (Excel-friendly). */
+/** Combined CSV across every client's sessions for the month (Excel-friendly). */
 export function monthlyCombinedCsv(reports: MonthlyClientReport[], s: Settings, locale: Locale): string {
   const header = [
     t(locale, 'client'),
     t(locale, 'case'),
     t(locale, 'date'),
     t(locale, 'task'),
-    t(locale, 'description'),
-    t(locale, 'hours'),
-    t(locale, 'billableHours'),
+    t(locale, 'actualHours'),
+    t(locale, 'billedHours'),
+    t(locale, 'billable'),
   ];
   const cell = (v: string | number) => {
     const str = String(v ?? '');
@@ -107,9 +133,17 @@ export function monthlyCombinedCsv(reports: MonthlyClientReport[], s: Settings, 
   };
   const rows = [header.map(cell).join(',')];
   for (const { client, report } of reports) {
-    for (const e of report.entries) {
+    for (const row of reportSessions(report)) {
       rows.push(
-        [client.name, report.project?.name ?? '', formatDate(e.startMs, s.timezone, locale), e.taskName ?? '', e.description ?? '', e.hours.toFixed(2), e.billable.toFixed(2)]
+        [
+          client.name,
+          [row.caseNumber, row.caseName].filter(Boolean).join(' '),
+          formatDate(row.session.startMs, s.timezone, locale),
+          row.taskName,
+          row.session.hours.toFixed(2),
+          row.session.billedHours.toFixed(2),
+          row.session.billable ? t(locale, 'billable') : t(locale, 'nonBillable'),
+        ]
           .map(cell)
           .join(','),
       );
@@ -120,7 +154,7 @@ export function monthlyCombinedCsv(reports: MonthlyClientReport[], s: Settings, 
 
 /**
  * Send the automatic monthly report to the configured address: a summary table
- * (hours + amount per client) with a combined CSV of all entries attached.
+ * (hours + amount per client) with a combined CSV of all sessions attached.
  */
 export async function sendMonthlyReport(
   to: string,
@@ -138,18 +172,18 @@ export async function sendMonthlyReport(
       (r) =>
         `<tr><td style="padding:6px 8px;border-bottom:1px solid #eef1f6">${esc(r.client.name)}</td>
          <td style="padding:6px 8px;border-bottom:1px solid #eef1f6;text-align:center">${r.report.totalHours.toFixed(2)}</td>
-         <td style="padding:6px 8px;border-bottom:1px solid #eef1f6;text-align:center">${r.report.totalBillable.toFixed(2)}</td>
+         <td style="padding:6px 8px;border-bottom:1px solid #eef1f6;text-align:center">${r.report.totalBilledHours.toFixed(2)}</td>
          <td style="padding:6px 8px;border-bottom:1px solid #eef1f6;text-align:center">${esc(money(r.report.amount, r.report.currency, locale))}</td></tr>`,
     )
     .join('');
 
   const heInner = `
     <h2 style="margin:0 0 6px">דוח שעות חודשי — ${esc(label)}</h2>
-    <p class="muted" style="color:#6b7688">${esc(s.firmName)}</p>
+    <p style="color:#6b7688">${esc(s.firmName)}</p>
     <table style="width:100%;border-collapse:collapse;font-size:14px;margin-top:12px">
       <thead><tr>
         <th style="text-align:right;padding:6px 8px;border-bottom:2px solid #e4ebf7">לקוח</th>
-        <th style="padding:6px 8px;border-bottom:2px solid #e4ebf7">שעות</th>
+        <th style="padding:6px 8px;border-bottom:2px solid #e4ebf7">שעות בפועל</th>
         <th style="padding:6px 8px;border-bottom:2px solid #e4ebf7">לחיוב</th>
         <th style="padding:6px 8px;border-bottom:2px solid #e4ebf7">סכום</th>
       </tr></thead>
@@ -169,8 +203,8 @@ export async function sendMonthlyReport(
     <table style="width:100%;border-collapse:collapse;font-size:14px;margin-top:12px">
       <thead><tr>
         <th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e4ebf7">Client</th>
-        <th style="padding:6px 8px;border-bottom:2px solid #e4ebf7">Hours</th>
-        <th style="padding:6px 8px;border-bottom:2px solid #e4ebf7">Billable</th>
+        <th style="padding:6px 8px;border-bottom:2px solid #e4ebf7">Actual</th>
+        <th style="padding:6px 8px;border-bottom:2px solid #e4ebf7">Billed</th>
         <th style="padding:6px 8px;border-bottom:2px solid #e4ebf7">Amount</th>
       </tr></thead>
       <tbody>${rows || `<tr><td colspan="4" style="padding:10px;color:#6b7688">No data for this month</td></tr>`}</tbody>

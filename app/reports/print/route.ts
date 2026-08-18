@@ -14,14 +14,15 @@ export async function GET(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const clientId = url.searchParams.get('clientId') ?? '';
   const projectId = url.searchParams.get('projectId') || null;
+  const allTime = url.searchParams.get('allTime') === '1';
   const from = Number(url.searchParams.get('from'));
   const to = Number(url.searchParams.get('to'));
-  if (!clientId || !Number.isFinite(from) || !Number.isFinite(to)) {
+  if (!clientId || (!allTime && (!Number.isFinite(from) || !Number.isFinite(to)))) {
     return new Response('bad request', { status: 400 });
   }
 
   const s = await getSettings();
-  const report = await buildReport({ clientId, projectId, fromMs: from, toMs: to });
+  const report = await buildReport({ clientId, projectId, fromMs: from || 0, toMs: to || Date.now(), allTime });
   if (!report) return new Response('not found', { status: 404 });
 
   const html = reportToHtml(report, s, localeOf(s), { standalone: true });

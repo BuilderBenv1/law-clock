@@ -79,25 +79,36 @@ export async function getInvoiceDetail(id: string): Promise<InvoiceDetail | null
 }
 
 /**
- * Turn tracked billable hours for a client (optionally one case) in a window
- * into invoice lines — one line per task, at the case/client rate.
+ * Turn tracked chargeable hours into invoice lines — one line per task, priced
+ * at that task's own case rate. Non-billable time contributes nothing, and when
+ * several cases are billed together each line names its case so the client can
+ * see what they are paying for.
  */
 export async function buildHoursLines(opts: {
   clientId: string;
   projectId?: string | null;
   fromMs: number;
   toMs: number;
+  allTime?: boolean;
 }): Promise<NewLine[]> {
   const report = await buildReport(opts);
   if (!report) return [];
-  return report.byTask
-    .filter((b) => b.billable > 0)
-    .map((b) => ({
-      label: b.label === '—' ? (report.project?.name ?? 'שעות עבודה') : b.label,
-      hours: b.billable,
-      ratePerHour: report.rate,
-      amount: round2(b.billable * report.rate),
-    }));
+
+  const multiCase = report.cases.length > 1;
+  const lines: NewLine[] = [];
+  for (const c of report.cases) {
+    for (const task of c.tasks) {
+      if (task.billedHours <= 0) continue;
+      const name = task.taskName === '—' ? c.caseName : task.taskName;
+      lines.push({
+        label: multiCase ? `${c.caseName} — ${name}` : name,
+        hours: task.billedHours,
+        ratePerHour: c.rate,
+        amount: round2(task.billedHours * c.rate),
+      });
+    }
+  }
+  return lines;
 }
 
 export async function markInvoicePaid(id: string, paidAt: Date = new Date()): Promise<void> {

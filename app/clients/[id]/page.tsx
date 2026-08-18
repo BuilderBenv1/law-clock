@@ -63,6 +63,11 @@ export default async function ClientPage({ params }: { params: Promise<{ id: str
               <input name="alertThresholdHours" type="number" step="0.5" min="0" className="input" placeholder={t(locale, 'noAlert')} />
               <div className="text-xs text-slate-500 mt-1">{t(locale, 'alertThresholdHelp')}</div>
             </div>
+            <div>
+              <label className="label">{t(locale, 'alertAmount')} ({client.currency})</label>
+              <input name="alertThresholdAmount" type="number" step="100" min="0" className="input" placeholder={t(locale, 'noAlert')} />
+              <div className="text-xs text-slate-500 mt-1">{t(locale, 'alertAmountHelp')}</div>
+            </div>
             <div className="md:col-span-2">
               <button className="btn-primary" type="submit">
                 {t(locale, 'save')}
@@ -80,10 +85,13 @@ export default async function ClientPage({ params }: { params: Promise<{ id: str
               const over = thr != null && thr > 0 && c.hours >= thr;
               return (
                 <Link key={c.project.id} href={`/cases/${c.project.id}`} className="card hover:border-slate-600 transition block">
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium truncate">
                       {c.project.caseNumber ? <span className="text-slate-500">{c.project.caseNumber} · </span> : null}
                       {c.project.name}
+                      {c.project.isDefault === 1 && (
+                        <span className="ms-2 pill bg-slate-800 text-slate-500">{t(locale, 'generalCase')}</span>
+                      )}
                     </span>
                     <span className={`pill ${c.project.status === 'open' ? 'bg-sky-950 text-sky-300' : 'bg-slate-800 text-slate-400'}`}>
                       {t(locale, c.project.status === 'open' ? 'open' : 'closed')}
@@ -137,6 +145,40 @@ export default async function ClientPage({ params }: { params: Promise<{ id: str
           <div className="md:col-span-2">
             <label className="label">{t(locale, 'notes')}</label>
             <textarea name="notes" className="input" rows={2} defaultValue={client.notes ?? ''} />
+          </div>
+
+          {/* Client-wide limits, summed across every case. */}
+          <div className="md:col-span-2 border-t border-slate-800 pt-3">
+            <div className="text-sm font-medium text-slate-300">{t(locale, 'clientAlerts')}</div>
+            <div className="text-xs text-slate-500">{t(locale, 'clientAlertsHelp')}</div>
+          </div>
+          <div>
+            <label className="label">
+              {t(locale, 'alertThreshold')} ({t(locale, 'hours')})
+            </label>
+            <input
+              name="alertThresholdHours"
+              type="number"
+              step="0.5"
+              min="0"
+              className="input"
+              defaultValue={client.alertThresholdHours ?? ''}
+              placeholder={t(locale, 'noAlert')}
+            />
+          </div>
+          <div>
+            <label className="label">
+              {t(locale, 'alertAmount')} ({client.currency})
+            </label>
+            <input
+              name="alertThresholdAmount"
+              type="number"
+              step="100"
+              min="0"
+              className="input"
+              defaultValue={client.alertThresholdAmount ?? ''}
+              placeholder={t(locale, 'noAlert')}
+            />
           </div>
           <div className="md:col-span-2 flex justify-between">
             <button className="btn-primary" type="submit">

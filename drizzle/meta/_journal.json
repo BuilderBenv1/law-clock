@@ -15,6 +15,13 @@
       "when": 1784711946210,
       "tag": "0001_invoices_logo_casenumber",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787083601101,
+      "tag": "0002_pause_resume_billable_alerts",
+      "breakpoints": true
     }
   ]
 }

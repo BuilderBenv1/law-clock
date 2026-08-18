@@ -1,12 +1,13 @@
 import { auth } from '@/lib/auth';
 import { buildReport } from '@/lib/queries';
 import { getSettings, localeOf } from '@/lib/settings';
-import { reportToCsv } from '@/lib/report-format';
+import { renderStatementPdf } from '@/lib/pdf/statement';
 import { attachmentHeaders } from '@/lib/http';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+/** The hours statement as a downloadable PDF. */
 export async function GET(req: Request): Promise<Response> {
   const session = await auth();
   if (!session?.user) return new Response('unauthorized', { status: 401 });
@@ -25,9 +26,9 @@ export async function GET(req: Request): Promise<Response> {
   const report = await buildReport({ clientId, projectId, fromMs: from || 0, toMs: to || Date.now(), allTime });
   if (!report) return new Response('not found', { status: 404 });
 
-  const csv = reportToCsv(report, s, localeOf(s));
+  const pdf = await renderStatementPdf(report, s, localeOf(s));
   const stamp = allTime ? 'all-time' : new Date(from).toISOString().slice(0, 10);
-  return new Response(csv, {
-    headers: attachmentHeaders('text/csv; charset=utf-8', `report-${report.client.name}-${stamp}.csv`),
+  return new Response(Buffer.from(pdf), {
+    headers: attachmentHeaders('application/pdf', `statement-${report.client.name}-${stamp}.pdf`),
   });
 }

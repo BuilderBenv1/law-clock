@@ -34,8 +34,11 @@ export default async function InvoicePage({ params }: { params: Promise<{ id: st
           ) : null}
         </div>
         <div className="flex gap-2 flex-wrap">
+          <a href={`/api/invoices/${inv.id}/pdf`} className="btn-primary">
+            ⭳ {t(locale, 'downloadInvoicePdf')}
+          </a>
           <a href={`/invoices/${inv.id}/print`} target="_blank" className="btn-ghost">
-            🖶 {t(locale, 'downloadPdf')}
+            🖶 {t(locale, 'print')}
           </a>
           {inv.status === 'paid' ? (
             <form action={markInvoiceUnpaidAction}>

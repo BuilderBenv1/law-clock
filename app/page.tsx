@@ -8,9 +8,11 @@ import {
   hoursInWindow,
   activeCasesWithHours,
   recentEntries,
+  resumableTasks,
 } from '@/lib/queries';
 import { startOfDayMs, startOfWeekMs, startOfMonthMs, formatHm } from '@/lib/time';
-import { formatDate } from '@/lib/format';
+import { formatDate, money } from '@/lib/format';
+import { resumeTask } from '@/lib/actions';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,14 +21,15 @@ export default async function DashboardPage() {
   const locale = localeOf(s);
   const now = Date.now();
 
-  const [tree, running, todayH, weekH, monthH, cases, recent] = await Promise.all([
+  const [tree, running, todayH, weekH, monthH, cases, recent, resumable] = await Promise.all([
     getClientsTree(),
     getRunningTimer(),
     hoursInWindow(startOfDayMs(now, s.timezone), now + 1),
     hoursInWindow(startOfWeekMs(now, s.timezone), now + 1),
     hoursInWindow(startOfMonthMs(now, s.timezone), now + 1),
     activeCasesWithHours(),
-    recentEntries(12),
+    recentEntries(10),
+    resumableTasks(6),
   ]);
 
   const runningProps = running
@@ -35,9 +38,12 @@ export default async function DashboardPage() {
         startMs: running.entry.startMs,
         clientName: running.clientName,
         projectName: running.projectName,
-        taskName: running.taskName,
+        taskName: running.taskName ?? running.entry.description,
       }
     : null;
+
+  // Anything already running is not offered as something to resume.
+  const resumeList = resumable.filter((r) => !running || r.taskId !== running.entry.taskId);
 
   return (
     <div className="space-y-6">
@@ -48,7 +54,41 @@ export default async function DashboardPage() {
         </Link>
       </div>
 
-      <TimerWidget tree={tree} running={runningProps} locale={locale} />
+      <TimerWidget tree={tree} running={runningProps} locale={locale} serverNowMs={now} />
+
+      {/* Pick up where you left off */}
+      {resumeList.length > 0 && (
+        <section className="card">
+          <div className="flex items-baseline justify-between mb-3">
+            <h2 className="font-semibold">{t(locale, 'resumeWork')}</h2>
+            <span className="text-xs text-slate-500">{t(locale, 'continueWorking')}</span>
+          </div>
+          <ul className="space-y-2">
+            {resumeList.map((r) => (
+              <li
+                key={`${r.projectId}-${r.taskId ?? r.taskName}`}
+                className="flex items-center justify-between gap-3 rounded-lg border border-slate-800 px-3 py-2 hover:border-slate-600"
+              >
+                <div className="min-w-0">
+                  <div className="text-sm font-medium truncate">{r.taskName}</div>
+                  <div className="text-xs text-slate-500 truncate">
+                    {r.clientName} · {r.projectName} · {formatHm(r.totalMs)}
+                  </div>
+                </div>
+                <form action={resumeTask} className="shrink-0">
+                  <input type="hidden" name="clientId" value={r.clientId} />
+                  <input type="hidden" name="projectId" value={r.projectId} />
+                  <input type="hidden" name="taskId" value={r.taskId ?? ''} />
+                  <input type="hidden" name="taskName" value={r.taskName} />
+                  <button className="btn-green px-4" type="submit">
+                    ▶ {t(locale, 'resume')}
+                  </button>
+                </form>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <div className="grid grid-cols-3 gap-4">
         <Stat label={t(locale, 'today')} value={todayH} />
@@ -64,19 +104,42 @@ export default async function DashboardPage() {
           ) : (
             <ul className="space-y-3">
               {cases.slice(0, 8).map((c) => {
-                const thr = c.project.alertThresholdHours;
-                const pct = thr && thr > 0 ? Math.min(100, (c.hours / thr) * 100) : null;
-                const over = thr != null && thr > 0 && c.hours >= thr;
+                const hoursCap = c.project.alertThresholdHours;
+                const amountCap = c.project.alertThresholdAmount;
+                // Show whichever limit the client actually set, hours taking precedence.
+                const pct = hoursCap
+                  ? Math.min(100, (c.hours / hoursCap) * 100)
+                  : amountCap
+                    ? Math.min(100, (c.amount / amountCap) * 100)
+                    : null;
+                const over = hoursCap
+                  ? c.hours >= hoursCap
+                  : amountCap
+                    ? c.amount >= amountCap
+                    : false;
                 return (
                   <li key={c.project.id}>
-                    <Link href={`/cases/${c.project.id}`} className="flex items-center justify-between text-sm hover:text-sky-300">
+                    <Link
+                      href={`/cases/${c.project.id}`}
+                      className="flex items-center justify-between gap-2 text-sm hover:text-sky-300"
+                    >
                       <span className="truncate">
                         <span className="text-slate-400">{c.clientName} · </span>
+                        {c.project.caseNumber ? `${c.project.caseNumber} · ` : ''}
                         {c.project.name}
                       </span>
-                      <span className={`num ${over ? 'text-amber-400' : 'text-slate-300'}`}>
-                        {c.hours.toFixed(2)}
-                        {thr ? <span className="text-slate-500"> / {thr.toFixed(0)}</span> : null}
+                      <span className={`num shrink-0 ${over ? 'text-amber-400' : 'text-slate-300'}`}>
+                        {hoursCap || !amountCap ? (
+                          <>
+                            {c.hours.toFixed(2)}
+                            {hoursCap ? <span className="text-slate-500"> / {hoursCap.toFixed(0)}</span> : null}
+                          </>
+                        ) : (
+                          <>
+                            {money(c.amount, 'ILS', locale)}
+                            <span className="text-slate-500"> / {money(amountCap, 'ILS', locale)}</span>
+                          </>
+                        )}
                       </span>
                     </Link>
                     {pct != null && (
@@ -101,10 +164,13 @@ export default async function DashboardPage() {
                 <li key={r.entry.id} className="flex items-center justify-between gap-2">
                   <span className="truncate">
                     <span className="text-slate-500">{formatDate(r.entry.startMs, s.timezone, locale)} · </span>
-                    {r.clientName} · {r.projectName}
-                    {r.taskName ? <span className="text-slate-500"> · {r.taskName}</span> : null}
+                    {r.taskName ?? r.entry.description ?? r.projectName}
+                    <span className="text-slate-500"> · {r.clientName}</span>
                   </span>
-                  <span className="num text-slate-300 shrink-0">{formatHm(r.entry.durationMs ?? 0)}</span>
+                  <span className="num text-slate-300 shrink-0">
+                    {r.entry.billable === 0 && <span className="text-slate-600 me-1">({t(locale, 'nonBillable')})</span>}
+                    {formatHm(r.entry.durationMs ?? 0)}
+                  </span>
                 </li>
               ))}
             </ul>

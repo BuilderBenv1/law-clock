@@ -32,6 +32,7 @@ export function InvoiceForm({
   const [clientId, setClientId] = useState(preselect?.clientId ?? '');
   const [projectId, setProjectId] = useState(preselect?.projectId ?? '');
   const [includeHours, setIncludeHours] = useState(true);
+  const [allTime, setAllTime] = useState(false);
   const [from, setFrom] = useState(toDateInput(firstOfMonth));
   const [to, setTo] = useState(toDateInput(lastOfMonth));
   const [lines, setLines] = useState<ManualLine[]>([]);
@@ -50,6 +51,7 @@ export function InvoiceForm({
       <input type="hidden" name="from" value={fromMs} />
       <input type="hidden" name="to" value={toMs} />
       <input type="hidden" name="lines" value={JSON.stringify(cleanLines)} />
+      <input type="hidden" name="allTime" value={allTime ? '1' : '0'} />
 
       <div className="card grid gap-3 md:grid-cols-2">
         <div>
@@ -92,7 +94,17 @@ export function InvoiceForm({
           {t(locale, 'includeHours')}
         </label>
         {includeHours && (
-          <div className="grid gap-3 md:grid-cols-2">
+          <>
+            <label className="flex items-center gap-2 text-sm text-slate-400">
+              <input
+                type="checkbox"
+                checked={allTime}
+                onChange={(e) => setAllTime(e.target.checked)}
+                className="w-4 h-4"
+              />
+              {t(locale, 'allTime')}
+            </label>
+          <div className={`grid gap-3 md:grid-cols-2 ${allTime ? 'opacity-40 pointer-events-none' : ''}`}>
             <div>
               <label className="label">{t(locale, 'from')}</label>
               <input type="date" className="input" value={from} onChange={(e) => setFrom(e.target.value)} />
@@ -102,6 +114,7 @@ export function InvoiceForm({
               <input type="date" className="input" value={to} onChange={(e) => setTo(e.target.value)} />
             </div>
           </div>
+          </>
         )}
       </div>
 

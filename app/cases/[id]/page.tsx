@@ -2,17 +2,19 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { getProjectDetail } from '@/lib/queries';
 import { getSettings, localeOf } from '@/lib/settings';
-import { t, monthLabel } from '@/lib/i18n';
+import { t } from '@/lib/i18n';
 import { money, formatDate } from '@/lib/format';
-import { formatHm, monthKey, monthRange } from '@/lib/time';
+import { formatHm, formatTimeOfDay } from '@/lib/time';
+import { Combobox } from '@/components/combobox';
 import {
-  createTask,
   archiveTask,
   addManualEntry,
   deleteEntry,
+  toggleEntryBillable,
   updateProject,
   setProjectStatus,
   archiveProject,
+  resumeTask,
 } from '@/lib/actions';
 
 export const dynamic = 'force-dynamic';
@@ -23,16 +25,16 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
   const locale = localeOf(s);
   const d = await getProjectDetail(id);
   if (!d) notFound();
-  const { project, client, tasks, entries, hours, billable, rate, currency, amount } = d;
+  const { project, client, tasks, entries, hours, billedHours, nonBillableHours, rate, currency, amount } = d;
 
-  const thr = project.alertThresholdHours;
-  const over = thr != null && thr > 0 && hours >= thr;
+  const hoursCap = project.alertThresholdHours;
+  const amountCap = project.alertThresholdAmount;
+  const overHours = hoursCap != null && hoursCap > 0 && hours >= hoursCap;
+  const overAmount = amountCap != null && amountCap > 0 && amount >= amountCap;
 
-  const mk = monthKey(new Date(), s.timezone);
-  const { startMs, endMs } = monthRange(mk, s.timezone);
-  const csvHref = `/api/reports/csv?clientId=${client.id}&projectId=${project.id}&from=${startMs}&to=${endMs}`;
-  const printHref = `/reports/print?clientId=${client.id}&projectId=${project.id}&from=${startMs}&to=${endMs}`;
+  const query = `clientId=${client.id}&projectId=${project.id}&allTime=1`;
   const isoToday = new Date().toISOString().slice(0, 10);
+  const taskNames = tasks.map((tk) => tk.name);
 
   return (
     <div className="space-y-8">
@@ -40,92 +42,118 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
         <Link href={`/clients/${client.id}`} className="text-xs text-slate-500 hover:underline">
           ← {client.name}
         </Link>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <h1 className="text-2xl font-semibold">
             {project.caseNumber ? <span className="text-slate-500">{project.caseNumber} · </span> : null}
             {project.name}
           </h1>
-          <span className={`pill ${project.status === 'open' ? 'bg-sky-950 text-sky-300' : 'bg-slate-800 text-slate-400'}`}>
+          <span
+            className={`pill ${project.status === 'open' ? 'bg-sky-950 text-sky-300' : 'bg-slate-800 text-slate-400'}`}
+          >
             {t(locale, project.status === 'open' ? 'open' : 'closed')}
           </span>
+          {project.isDefault === 1 && (
+            <span className="pill bg-slate-800 text-slate-400">{t(locale, 'generalCase')}</span>
+          )}
         </div>
         {project.description ? <p className="text-sm text-slate-400 mt-1">{project.description}</p> : null}
       </header>
 
       {/* Totals */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Stat label={t(locale, 'totalHours')} value={hours.toFixed(2)} />
-        <Stat label={t(locale, 'billableHours')} value={billable.toFixed(2)} />
+        <Stat label={t(locale, 'actualHours')} value={hours.toFixed(2)} />
+        <Stat label={t(locale, 'billedHours')} value={billedHours.toFixed(2)} />
         <Stat label={t(locale, 'hourlyRate')} value={money(rate, currency, locale)} />
         <Stat label={t(locale, 'amount')} value={money(amount, currency, locale)} highlight />
       </div>
+      <p className="text-xs text-slate-500 -mt-4">
+        {t(locale, 'roundingNote')} ({t(locale, 'roundingUnit')}: {s.roundIncrementMin} {t(locale, 'minutes')})
+        {nonBillableHours > 0 && ` · ${t(locale, 'nonBillableHours')}: ${nonBillableHours.toFixed(2)}`}
+      </p>
 
-      {thr != null && thr > 0 && (
-        <div className={`card ${over ? 'border-amber-700/60 bg-amber-950/20' : ''}`}>
-          <div className="flex items-center justify-between text-sm">
-            <span>
-              {t(locale, 'alertThreshold')}: <strong>{thr.toFixed(1)}</strong> {t(locale, 'hours')}
-              {over ? <span className="text-amber-400"> · {t(locale, 'reached')} ({hours.toFixed(2)})</span> : null}
-            </span>
-            <span className="num text-slate-400">
-              {hours.toFixed(2)} / {thr.toFixed(1)}
-            </span>
-          </div>
-          <div className="mt-2 h-2 rounded-full bg-slate-800 overflow-hidden">
-            <div className={`h-full ${over ? 'bg-amber-500' : 'bg-sky-500'}`} style={{ width: `${Math.min(100, (hours / thr) * 100)}%` }} />
-          </div>
+      {/* Alert progress */}
+      {(hoursCap || amountCap) && (
+        <div className={`card space-y-3 ${overHours || overAmount ? 'border-amber-700/60 bg-amber-950/20' : ''}`}>
+          {hoursCap != null && hoursCap > 0 && (
+            <Progress
+              label={t(locale, 'alertThreshold')}
+              current={`${hours.toFixed(2)} / ${hoursCap.toFixed(1)}`}
+              pct={Math.min(100, (hours / hoursCap) * 100)}
+              over={overHours}
+              note={overHours ? t(locale, 'reached') : null}
+            />
+          )}
+          {amountCap != null && amountCap > 0 && (
+            <Progress
+              label={t(locale, 'alertAmount')}
+              current={`${money(amount, currency, locale)} / ${money(amountCap, currency, locale)}`}
+              pct={Math.min(100, (amount / amountCap) * 100)}
+              over={overAmount}
+              note={overAmount ? t(locale, 'reached') : null}
+            />
+          )}
         </div>
       )}
 
-      {/* Report export */}
+      {/* Documents */}
       <section className="card">
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
-            <h2 className="font-semibold">{t(locale, 'report')}</h2>
-            <div className="text-xs text-slate-500">{monthLabel(mk, locale)}</div>
+            <h2 className="font-semibold">{t(locale, 'statement')}</h2>
+            <div className="text-xs text-slate-500">{t(locale, 'allTime')}</div>
           </div>
           <div className="flex gap-2 flex-wrap">
-            <a href={csvHref} className="btn-ghost">
+            <a href={`/api/reports/csv?${query}`} className="btn-ghost">
               ⭳ {t(locale, 'exportCsv')}
             </a>
-            <a href={printHref} target="_blank" className="btn-ghost">
-              🖶 {t(locale, 'print')}
+            <a href={`/api/reports/pdf?${query}`} className="btn-ghost">
+              ⭳ {t(locale, 'downloadStatement')}
             </a>
             <Link href={`/invoices/new?clientId=${client.id}&projectId=${project.id}`} className="btn-green">
               ＋ {t(locale, 'newInvoice')}
             </Link>
-            <Link href={`/reports?clientId=${client.id}&projectId=${project.id}`} className="btn-primary">
+            <Link href={`/reports?${query}`} className="btn-primary">
               {t(locale, 'reportFor')} →
             </Link>
           </div>
         </div>
       </section>
 
-      {/* Tasks */}
+      {/* Tasks — each resumable in one click */}
       <section className="space-y-3">
         <h2 className="text-lg font-semibold">{t(locale, 'tasks')}</h2>
-        <div className="flex flex-wrap gap-2">
-          {tasks.map((tk) => (
-            <span key={tk.id} className="pill bg-slate-800 text-slate-300 gap-2">
-              {tk.name}
-              <form action={archiveTask} className="inline">
-                <input type="hidden" name="id" value={tk.id} />
-                <input type="hidden" name="projectId" value={project.id} />
-                <button type="submit" className="text-slate-500 hover:text-red-400" title={t(locale, 'delete')}>
-                  ✕
-                </button>
-              </form>
-            </span>
-          ))}
-          {tasks.length === 0 ? <span className="text-sm text-slate-500">{t(locale, 'noEntries')}</span> : null}
-        </div>
-        <form action={createTask} className="flex gap-2 max-w-md">
-          <input type="hidden" name="projectId" value={project.id} />
-          <input name="name" className="input" placeholder={t(locale, 'addTask')} required />
-          <button className="btn-ghost shrink-0" type="submit">
-            ＋
-          </button>
-        </form>
+        {tasks.length === 0 ? (
+          <p className="text-sm text-slate-500">{t(locale, 'noEntries')}</p>
+        ) : (
+          <ul className="grid gap-2 sm:grid-cols-2">
+            {tasks.map((tk) => (
+              <li
+                key={tk.id}
+                className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 px-3 py-2"
+              >
+                <span className="truncate text-sm">{tk.name}</span>
+                <span className="flex items-center gap-1 shrink-0">
+                  <form action={resumeTask}>
+                    <input type="hidden" name="clientId" value={client.id} />
+                    <input type="hidden" name="projectId" value={project.id} />
+                    <input type="hidden" name="taskId" value={tk.id} />
+                    <input type="hidden" name="taskName" value={tk.name} />
+                    <button className="btn-green px-3 py-1 text-xs" type="submit">
+                      ▶ {t(locale, 'resume')}
+                    </button>
+                  </form>
+                  <form action={archiveTask}>
+                    <input type="hidden" name="id" value={tk.id} />
+                    <input type="hidden" name="projectId" value={project.id} />
+                    <button type="submit" className="text-slate-600 hover:text-red-400 px-1" title={t(locale, 'delete')}>
+                      ✕
+                    </button>
+                  </form>
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       {/* Manual entry */}
@@ -134,16 +162,9 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
         <form action={addManualEntry} className="grid gap-3 md:grid-cols-4 mt-4">
           <input type="hidden" name="clientId" value={client.id} />
           <input type="hidden" name="projectId" value={project.id} />
-          <div>
-            <label className="label">{t(locale, 'task')}</label>
-            <select name="taskId" className="input">
-              <option value="">—</option>
-              {tasks.map((tk) => (
-                <option key={tk.id} value={tk.id}>
-                  {tk.name}
-                </option>
-              ))}
-            </select>
+          <div className="md:col-span-2">
+            <label className="label">{t(locale, 'taskLabel')}</label>
+            <Combobox name="taskName" options={taskNames} placeholder={t(locale, 'taskPickerHint')} />
           </div>
           <div>
             <label className="label">{t(locale, 'manualHours')}</label>
@@ -153,20 +174,21 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
             <label className="label">{t(locale, 'manualDate')}</label>
             <input name="date" type="date" className="input" defaultValue={isoToday} />
           </div>
-          <div className="flex items-end">
-            <button className="btn-primary w-full" type="submit">
+          <label className="flex items-center gap-2 text-xs text-slate-400 md:col-span-2">
+            <input type="checkbox" name="nonBillable" value="1" className="w-4 h-4" />
+            {t(locale, 'markNonBillable')}
+          </label>
+          <div className="md:col-span-2 flex justify-end">
+            <button className="btn-primary" type="submit">
               {t(locale, 'add')}
             </button>
-          </div>
-          <div className="md:col-span-4">
-            <input name="description" className="input" placeholder={t(locale, 'description')} />
           </div>
         </form>
       </details>
 
-      {/* Entries */}
+      {/* Sessions */}
       <section className="space-y-3">
-        <h2 className="text-lg font-semibold">{t(locale, 'entries')}</h2>
+        <h2 className="text-lg font-semibold">{t(locale, 'workSegments')}</h2>
         {entries.length === 0 ? (
           <p className="text-sm text-slate-500">{t(locale, 'noEntries')}</p>
         ) : (
@@ -175,8 +197,8 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
               <thead className="bg-slate-900/50 text-slate-400 text-xs">
                 <tr>
                   <th className="text-start p-3">{t(locale, 'date')}</th>
+                  <th className="text-start p-3">{t(locale, 'startEnd')}</th>
                   <th className="text-start p-3">{t(locale, 'task')}</th>
-                  <th className="text-start p-3">{t(locale, 'description')}</th>
                   <th className="text-end p-3">{t(locale, 'duration')}</th>
                   <th className="p-3"></th>
                 </tr>
@@ -185,14 +207,33 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
                 {entries.map((r) => (
                   <tr key={r.entry.id} className="border-t border-slate-800">
                     <td className="p-3 whitespace-nowrap">{formatDate(r.entry.startMs, s.timezone, locale)}</td>
-                    <td className="p-3 text-slate-400">{r.taskName ?? '—'}</td>
-                    <td className="p-3 text-slate-300">{r.entry.description ?? ''}</td>
+                    <td className="p-3 whitespace-nowrap num text-slate-400">
+                      {formatTimeOfDay(r.entry.startMs, s.timezone)}
+                      {r.entry.endMs != null ? `–${formatTimeOfDay(r.entry.endMs, s.timezone)}` : ''}
+                    </td>
+                    <td className={`p-3 ${r.entry.billable === 1 ? 'text-slate-300' : 'text-slate-500'}`}>
+                      {r.taskName ?? r.entry.description ?? '—'}
+                      {r.entry.billable === 0 && (
+                        <span className="ms-2 pill bg-slate-800 text-slate-500">{t(locale, 'nonBillable')}</span>
+                      )}
+                    </td>
                     <td className="p-3 text-end num">{formatHm(r.entry.durationMs ?? 0)}</td>
-                    <td className="p-3 text-end">
-                      <form action={deleteEntry} className="inline">
+                    <td className="p-3 text-end whitespace-nowrap">
+                      <form action={toggleEntryBillable} className="inline">
                         <input type="hidden" name="entryId" value={r.entry.id} />
                         <input type="hidden" name="projectId" value={project.id} />
-                        <button type="submit" className="text-slate-500 hover:text-red-400" title={t(locale, 'delete')}>
+                        <button
+                          type="submit"
+                          className="text-slate-500 hover:text-sky-300 text-xs"
+                          title={t(locale, r.entry.billable === 1 ? 'markNonBillable' : 'markBillable')}
+                        >
+                          {r.entry.billable === 1 ? '⊘' : '↺'}
+                        </button>
+                      </form>
+                      <form action={deleteEntry} className="inline ms-2">
+                        <input type="hidden" name="entryId" value={r.entry.id} />
+                        <input type="hidden" name="projectId" value={project.id} />
+                        <button type="submit" className="text-slate-600 hover:text-red-400" title={t(locale, 'delete')}>
                           ✕
                         </button>
                       </form>
@@ -207,7 +248,9 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
 
       {/* Edit case */}
       <details className="card">
-        <summary className="cursor-pointer font-medium text-slate-300">{t(locale, 'edit')} · {t(locale, 'case')}</summary>
+        <summary className="cursor-pointer font-medium text-slate-300">
+          {t(locale, 'edit')} · {t(locale, 'case')}
+        </summary>
         <form action={updateProject} className="grid gap-3 md:grid-cols-2 mt-4">
           <input type="hidden" name="id" value={project.id} />
           <input type="hidden" name="clientId" value={client.id} />
@@ -224,12 +267,48 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
             <input name="description" className="input" defaultValue={project.description ?? ''} />
           </div>
           <div>
-            <label className="label">{t(locale, 'hourlyRate')} ({currency})</label>
-            <input name="hourlyRate" type="number" step="0.01" min="0" className="input" defaultValue={project.hourlyRate ?? ''} placeholder={String(client.hourlyRate || '')} />
+            <label className="label">
+              {t(locale, 'hourlyRate')} ({currency})
+            </label>
+            <input
+              name="hourlyRate"
+              type="number"
+              step="0.01"
+              min="0"
+              className="input"
+              defaultValue={project.hourlyRate ?? ''}
+              placeholder={String(client.hourlyRate || '')}
+            />
+          </div>
+          <div />
+          <div>
+            <label className="label">
+              {t(locale, 'alertThreshold')} ({t(locale, 'hours')})
+            </label>
+            <input
+              name="alertThresholdHours"
+              type="number"
+              step="0.5"
+              min="0"
+              className="input"
+              defaultValue={project.alertThresholdHours ?? ''}
+              placeholder={t(locale, 'noAlert')}
+            />
           </div>
           <div>
-            <label className="label">{t(locale, 'alertThreshold')} ({t(locale, 'hours')})</label>
-            <input name="alertThresholdHours" type="number" step="0.5" min="0" className="input" defaultValue={project.alertThresholdHours ?? ''} placeholder={t(locale, 'noAlert')} />
+            <label className="label">
+              {t(locale, 'alertAmount')} ({currency})
+            </label>
+            <input
+              name="alertThresholdAmount"
+              type="number"
+              step="100"
+              min="0"
+              className="input"
+              defaultValue={project.alertThresholdAmount ?? ''}
+              placeholder={t(locale, 'noAlert')}
+            />
+            <div className="text-xs text-slate-500 mt-1">{t(locale, 'alertAmountHelp')}</div>
           </div>
           <div className="md:col-span-2">
             <button className="btn-primary" type="submit">
@@ -246,13 +325,15 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
               {t(locale, project.status === 'open' ? 'close' : 'reopen')}
             </button>
           </form>
-          <form action={archiveProject}>
-            <input type="hidden" name="id" value={project.id} />
-            <input type="hidden" name="clientId" value={client.id} />
-            <button className="btn-danger" type="submit">
-              {t(locale, 'archive')}
-            </button>
-          </form>
+          {project.isDefault !== 1 && (
+            <form action={archiveProject}>
+              <input type="hidden" name="id" value={project.id} />
+              <input type="hidden" name="clientId" value={client.id} />
+              <button className="btn-danger" type="submit">
+                {t(locale, 'archive')}
+              </button>
+            </form>
+          )}
         </div>
       </details>
     </div>
@@ -264,6 +345,35 @@ function Stat({ label, value, highlight }: { label: string; value: string; highl
     <div className="card">
       <div className="text-xs uppercase tracking-wide text-slate-400">{label}</div>
       <div className={`num text-2xl font-bold mt-1 ${highlight ? 'text-emerald-300' : ''}`}>{value}</div>
+    </div>
+  );
+}
+
+function Progress({
+  label,
+  current,
+  pct,
+  over,
+  note,
+}: {
+  label: string;
+  current: string;
+  pct: number;
+  over: boolean;
+  note: string | null;
+}) {
+  return (
+    <div>
+      <div className="flex items-center justify-between text-sm">
+        <span>
+          {label}
+          {note ? <span className="text-amber-400"> · {note}</span> : null}
+        </span>
+        <span className="num text-slate-400">{current}</span>
+      </div>
+      <div className="mt-2 h-2 rounded-full bg-slate-800 overflow-hidden">
+        <div className={`h-full ${over ? 'bg-amber-500' : 'bg-sky-500'}`} style={{ width: `${pct}%` }} />
+      </div>
     </div>
   );
 }

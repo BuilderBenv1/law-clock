@@ -21,7 +21,7 @@ export default async function NewInvoicePage({
   const clients: ReportFormClient[] = tree.map((c) => ({
     id: c.id,
     name: c.name,
-    projects: c.projects.map((p) => ({ id: p.id, name: p.name })),
+    projects: c.projects.map((p) => ({ id: p.id, name: p.name, caseNumber: p.caseNumber })),
   }));
 
   return (

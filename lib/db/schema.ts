@@ -7,14 +7,17 @@ import {
   timestamp,
   serial,
   index,
-  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 /**
- * Data model mirrors the way a lawyer thinks about their work — and the way
- * Cake structures it: Client → Project (a case/matter) → Task. Every timer
- * (a `time_entry`) is booked against a task, so hours roll up cleanly into a
- * case total and then a client total.
+ * Data model mirrors the way a lawyer thinks about their work:
+ * Client -> Case (a matter) -> Task. Every timer segment (a `time_entry`) is
+ * booked against a task, so hours roll up cleanly into a case total and then a
+ * client total.
+ *
+ * Pause/resume is modelled by having several entries share one task: each entry
+ * is a *session*, and the gap between two sessions is a pause. Client-facing
+ * documents render those gaps so the client can see exactly when work happened.
  */
 
 /** A firm client. `hourlyRate` is the default; a case may override it. */
@@ -29,6 +32,12 @@ export const clients = pgTable(
     hourlyRate: doublePrecision('hourly_rate').notNull().default(0),
     currency: text('currency').notNull().default('ILS'),
     notes: text('notes'),
+    /** Client-wide alerts (across every case). Null = no alert. */
+    alertThresholdHours: doublePrecision('alert_threshold_hours'),
+    alertThresholdAmount: doublePrecision('alert_threshold_amount'),
+    alertNotifiedHours: doublePrecision('alert_notified_hours'),
+    alertNotifiedAmount: doublePrecision('alert_notified_amount'),
+    alertNotifiedAt: timestamp('alert_notified_at', { withTimezone: true }),
     archived: integer('archived').notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -36,11 +45,13 @@ export const clients = pgTable(
 );
 
 /**
- * A case / matter (Cake calls it a "project"). Belongs to a client. Carries an
- * optional rate override and an optional hours-alert threshold: when logged
- * hours reach `alertThresholdHours`, the client is notified automatically.
- * `alertNotifiedHours` records the threshold value we already fired on, so the
- * same alert never repeats until the threshold is raised.
+ * A case / matter. Belongs to a client. Carries an optional rate override and
+ * optional hours/amount alert thresholds: when the case reaches them the client
+ * is notified automatically. `alertNotified*` records the threshold value we
+ * already fired on, so the same alert never repeats until the threshold moves.
+ *
+ * `isDefault` marks the auto-created general / uncategorised case that every
+ * client gets, so work can be logged without choosing a case first.
  */
 export const projects = pgTable(
   'projects',
@@ -50,17 +61,21 @@ export const projects = pgTable(
       .notNull()
       .references(() => clients.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
-    /** Firm's case/matter number (e.g. "2026-0143"); optional, shown with the name. */
+    /** Firm case/matter number (e.g. "2026-0143"); optional, shown with the name. */
     caseNumber: text('case_number'),
     description: text('description'),
     status: text('status').notNull().default('open'), // 'open' | 'closed'
-    /** Per-case hourly rate override; null = use the client's rate. */
+    /** Per-case hourly rate override; null = use the client rate. */
     hourlyRate: doublePrecision('hourly_rate'),
-    /** Notify the client once logged hours reach this many; null = no alert. */
+    /** Notify the client once the case reaches this many hours; null = no alert. */
     alertThresholdHours: doublePrecision('alert_threshold_hours'),
-    /** The threshold value already alerted on (dedupe guard); null = not yet. */
+    /** Notify the client once the case reaches this billed amount; null = no alert. */
+    alertThresholdAmount: doublePrecision('alert_threshold_amount'),
     alertNotifiedHours: doublePrecision('alert_notified_hours'),
+    alertNotifiedAmount: doublePrecision('alert_notified_amount'),
     alertNotifiedAt: timestamp('alert_notified_at', { withTimezone: true }),
+    /** 1 = the catch-all case for uncategorised work. */
+    isDefault: integer('is_default').notNull().default(0),
     archived: integer('archived').notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     closedAt: timestamp('closed_at', { withTimezone: true }),
@@ -68,7 +83,11 @@ export const projects = pgTable(
   (t) => ({ clientIdx: index('project_client_idx').on(t.clientId) }),
 );
 
-/** A task within a case — the finest-grained bucket a timer is booked against. */
+/**
+ * A task within a case — the unit of work a timer is booked against. Tasks are
+ * created on the fly from what the lawyer types in the timer box, and offered
+ * back as suggestions next time (the "previous tasks" picker).
+ */
 export const tasks = pgTable(
   'tasks',
   {
@@ -84,10 +103,13 @@ export const tasks = pgTable(
 );
 
 /**
- * One stretch of tracked work — the output of "start timer / stop timer", or a
- * manual entry. `endMs` NULL means the timer is still running; `durationMs` is
- * filled in when it stops. Client and project are denormalized so hours
- * aggregate without joins and survive a task rename.
+ * One work session — the output of "start timer / pause timer", or a manual
+ * entry. `endMs` NULL means the timer is running now. Client and project are
+ * denormalized so hours aggregate without joins and survive a task rename.
+ *
+ * `billable = 0` means the time is tracked but never charged (pro-bono,
+ * internal, written off): it shows in reports as non-billable and is excluded
+ * from invoices and amount totals.
  */
 export const timeEntries = pgTable(
   'time_entries',
@@ -104,14 +126,17 @@ export const timeEntries = pgTable(
     startMs: bigint('start_ms', { mode: 'number' }).notNull(),
     /** NULL while the timer runs. */
     endMs: bigint('end_ms', { mode: 'number' }),
-    /** Milliseconds of work; NULL while running, set on stop / on manual entry. */
+    /** Milliseconds of work; NULL while running, set on pause / on manual entry. */
     durationMs: bigint('duration_ms', { mode: 'number' }),
+    /** 1 = chargeable (default), 0 = tracked but not billed. */
+    billable: integer('billable').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     clientIdx: index('entry_client_idx').on(t.clientId),
     projectIdx: index('entry_project_idx').on(t.projectId),
     startIdx: index('entry_start_idx').on(t.startMs),
+    taskIdx: index('entry_task_idx').on(t.taskId),
   }),
 );
 
@@ -129,7 +154,7 @@ export const settings = pgTable('settings', {
   reportEmail: text('report_email'),
   defaultCurrency: text('default_currency').notNull().default('ILS'),
   defaultHourlyRate: doublePrecision('default_hourly_rate').notNull().default(0),
-  /** Billing rounds each entry up to this many minutes (legal norm: 6). */
+  /** Billing rounds each session up to this many minutes (legal norm: 6). */
   roundIncrementMin: integer('round_increment_min').notNull().default(6),
   timezone: text('timezone').notNull().default('Asia/Jerusalem'),
   locale: text('locale').notNull().default('he'), // 'he' | 'en'
@@ -187,7 +212,7 @@ export const invoiceLines = pgTable(
       .notNull()
       .references(() => invoices.id, { onDelete: 'cascade' }),
     label: text('label').notNull(),
-    /** 0/0 for a flat one-off line; otherwise hours × ratePerHour. */
+    /** 0/0 for a flat one-off line; otherwise hours x ratePerHour. */
     hours: doublePrecision('hours').notNull().default(0),
     ratePerHour: doublePrecision('rate_per_hour').notNull().default(0),
     amount: doublePrecision('amount').notNull(),

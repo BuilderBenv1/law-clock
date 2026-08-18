@@ -7,7 +7,7 @@ import { getDb } from './db';
 import { clients, projects, tasks, timeEntries, settings, invoices } from './db/schema';
 import { getSettings, localeOf } from './settings';
 import { newId, round2 } from './util';
-import { checkThreshold } from './alerts';
+import { checkAlerts } from './alerts';
 import { sendMonthNow } from './monthly';
 import {
   buildHoursLines,
@@ -19,6 +19,10 @@ import {
   type NewLine,
 } from './invoice-service';
 import { sendInvoiceEmail } from './email';
+
+/** Sentinel values the timer form uses for "make me a new one" / "no case". */
+const NEW = '__new__';
+const DEFAULT_CASE = '__default__';
 
 function str(fd: FormData, key: string): string {
   return String(fd.get(key) ?? '').trim();
@@ -40,33 +44,141 @@ function dateToMs(dateStr: string): number {
   return Date.UTC(y, m - 1, d, 12, 0, 0);
 }
 
+// ------------------------- Shared resolvers -------------------------
+
+/**
+ * Every client owns a catch-all case so time can be logged the moment the client
+ * exists — no one should have to invent a matter before starting a timer.
+ * Created lazily so clients made before this feature get one on first use.
+ */
+async function ensureDefaultCase(clientId: string): Promise<string> {
+  const db = getDb();
+  const [existing] = await db
+    .select({ id: projects.id })
+    .from(projects)
+    .where(and(eq(projects.clientId, clientId), eq(projects.isDefault, 1)))
+    .limit(1);
+  if (existing) return existing.id;
+
+  const s = await getSettings();
+  const id = newId();
+  await db.insert(projects).values({
+    id,
+    clientId,
+    name: s.locale === 'en' ? 'General' : 'כללי',
+    description: s.locale === 'en' ? 'Uncategorised work' : 'עבודה שאינה משויכת לתיק',
+    isDefault: 1,
+  });
+  return id;
+}
+
+/** Resolve the client the form points at, creating one if the user typed a new name. */
+async function resolveClientId(fd: FormData): Promise<string> {
+  const clientId = str(fd, 'clientId');
+  if (clientId && clientId !== NEW) return clientId;
+
+  const name = str(fd, 'newClientName');
+  if (!name) throw new Error('שם לקוח נדרש / Client name is required');
+  const db = getDb();
+  const s = await getSettings();
+  const id = newId();
+  await db.insert(clients).values({ id, name, currency: s.defaultCurrency, hourlyRate: s.defaultHourlyRate });
+  await ensureDefaultCase(id);
+  return id;
+}
+
+/** Resolve the case, creating one on the fly or falling back to the catch-all. */
+async function resolveProjectId(fd: FormData, clientId: string): Promise<string> {
+  const projectId = str(fd, 'projectId');
+  if (projectId && projectId !== NEW && projectId !== DEFAULT_CASE) return projectId;
+
+  if (projectId === NEW) {
+    const name = str(fd, 'newCaseName');
+    if (!name) throw new Error('שם תיק נדרש / Case name is required');
+    const db = getDb();
+    const id = newId();
+    await db.insert(projects).values({
+      id,
+      clientId,
+      name,
+      caseNumber: str(fd, 'newCaseNumber') || null,
+    });
+    return id;
+  }
+  return ensureDefaultCase(clientId);
+}
+
+/**
+ * Tasks are whatever the lawyer typed in the timer box, reused when the same
+ * text comes back so hours accumulate under one heading and the text can be
+ * offered as a suggestion next time.
+ */
+async function findOrCreateTask(projectId: string, name: string): Promise<string | null> {
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  const db = getDb();
+  const [existing] = await db
+    .select({ id: tasks.id })
+    .from(tasks)
+    .where(and(eq(tasks.projectId, projectId), eq(tasks.name, trimmed)))
+    .limit(1);
+  if (existing) {
+    await db.update(tasks).set({ archived: 0 }).where(eq(tasks.id, existing.id));
+    return existing.id;
+  }
+  const id = newId();
+  await db.insert(tasks).values({ id, projectId, name: trimmed });
+  return id;
+}
+
+/** End any running session. Returns the project ids that were touched. */
+async function closeRunning(now: number): Promise<string[]> {
+  const db = getDb();
+  const running = await db.select().from(timeEntries).where(isNull(timeEntries.endMs));
+  for (const r of running) {
+    await db
+      .update(timeEntries)
+      .set({ endMs: now, durationMs: Math.max(0, now - r.startMs) })
+      .where(eq(timeEntries.id, r.id));
+  }
+  return running.map((r) => r.projectId);
+}
+
 // ------------------------- Timer -------------------------
 
 /**
- * Start a timer. Enforces a single running timer: any currently-running entry
- * is stopped (and its case threshold checked) before the new one begins.
+ * Start a session. Only one timer runs at a time, so anything already running is
+ * paused first (and its alerts evaluated). Client, case and task can all be
+ * created inline from the same submission.
  */
 export async function startTimer(fd: FormData): Promise<void> {
-  const clientId = str(fd, 'clientId');
-  const projectId = str(fd, 'projectId');
-  if (!clientId || !projectId) throw new Error('בחר לקוח ותיק / Pick a client and a case');
-  const taskId = str(fd, 'taskId') || null;
-  const description = str(fd, 'description') || null;
+  const clientId = await resolveClientId(fd);
+  const projectId = await resolveProjectId(fd, clientId);
+  const taskName = str(fd, 'taskName');
+  const taskId = await findOrCreateTask(projectId, taskName);
+
   const db = getDb();
   const now = Date.now();
+  const paused = await closeRunning(now);
 
-  // Stop any running timers first.
-  const running = await db.select().from(timeEntries).where(isNull(timeEntries.endMs));
-  for (const r of running) {
-    await db.update(timeEntries).set({ endMs: now, durationMs: Math.max(0, now - r.startMs) }).where(eq(timeEntries.id, r.id));
-  }
-  for (const r of running) await checkThreshold(r.projectId);
+  await db.insert(timeEntries).values({
+    id: newId(),
+    clientId,
+    projectId,
+    taskId,
+    description: taskName || null,
+    startMs: now,
+    endMs: null,
+    durationMs: null,
+    billable: str(fd, 'nonBillable') === '1' ? 0 : 1,
+  });
 
-  await db.insert(timeEntries).values({ id: newId(), clientId, projectId, taskId, description, startMs: now, endMs: null, durationMs: null });
+  for (const pid of paused) await checkAlerts(pid);
   revalidatePath('/');
 }
 
-export async function stopTimer(fd: FormData): Promise<void> {
+/** Pause (end) the running session. The work stays resumable from the dashboard. */
+export async function pauseTimer(fd: FormData): Promise<void> {
   const entryId = str(fd, 'entryId');
   if (!entryId) throw new Error('Missing entry id');
   const db = getDb();
@@ -76,11 +188,41 @@ export async function stopTimer(fd: FormData): Promise<void> {
     revalidatePath('/');
     return;
   }
-  await db.update(timeEntries).set({ endMs: now, durationMs: Math.max(0, now - entry.startMs) }).where(eq(timeEntries.id, entryId));
-  await checkThreshold(entry.projectId);
+  await db
+    .update(timeEntries)
+    .set({ endMs: now, durationMs: Math.max(0, now - entry.startMs) })
+    .where(eq(timeEntries.id, entryId));
+  await checkAlerts(entry.projectId);
   revalidatePath('/');
   revalidatePath('/clients/' + entry.clientId);
   revalidatePath('/cases/' + entry.projectId);
+}
+
+/** Pick a previous piece of work back up: opens a fresh session on the same task. */
+export async function resumeTask(fd: FormData): Promise<void> {
+  const clientId = str(fd, 'clientId');
+  const projectId = str(fd, 'projectId');
+  if (!clientId || !projectId) throw new Error('Missing client or case');
+  const taskName = str(fd, 'taskName');
+  const taskId = str(fd, 'taskId') || (await findOrCreateTask(projectId, taskName));
+
+  const db = getDb();
+  const now = Date.now();
+  const paused = await closeRunning(now);
+
+  await db.insert(timeEntries).values({
+    id: newId(),
+    clientId,
+    projectId,
+    taskId: taskId || null,
+    description: taskName || null,
+    startMs: now,
+    endMs: null,
+    durationMs: null,
+  });
+
+  for (const pid of paused) await checkAlerts(pid);
+  revalidatePath('/');
 }
 
 /** Discard a running timer without recording any time. */
@@ -91,24 +233,51 @@ export async function cancelTimer(fd: FormData): Promise<void> {
   revalidatePath('/');
 }
 
-/** Add a completed entry by hand (past work, phone calls, etc.). */
+/** Add a finished session by hand (past work, phone calls, etc.). */
 export async function addManualEntry(fd: FormData): Promise<void> {
   const clientId = str(fd, 'clientId');
   const projectId = str(fd, 'projectId');
   if (!clientId || !projectId) throw new Error('Pick a client and a case');
   const hours = num(fd, 'hours');
   if (!(hours > 0)) throw new Error('שעות חייבות להיות גדולות מאפס / Hours must be greater than zero');
-  const taskId = str(fd, 'taskId') || null;
-  const description = str(fd, 'description') || null;
+
+  const taskName = str(fd, 'taskName');
+  const taskId = taskName ? await findOrCreateTask(projectId, taskName) : str(fd, 'taskId') || null;
   const dateStr = str(fd, 'date');
   const startMs = dateStr ? dateToMs(dateStr) : Date.now();
   const durationMs = Math.round(hours * 3_600_000);
+
   const db = getDb();
-  await db.insert(timeEntries).values({ id: newId(), clientId, projectId, taskId, description, startMs, endMs: startMs + durationMs, durationMs });
-  await checkThreshold(projectId);
+  await db.insert(timeEntries).values({
+    id: newId(),
+    clientId,
+    projectId,
+    taskId,
+    description: taskName || str(fd, 'description') || null,
+    startMs,
+    endMs: startMs + durationMs,
+    durationMs,
+    billable: str(fd, 'nonBillable') === '1' ? 0 : 1,
+  });
+  await checkAlerts(projectId);
   revalidatePath('/');
   revalidatePath('/clients/' + clientId);
   revalidatePath('/cases/' + projectId);
+}
+
+/** Flip a session between chargeable and written-off. */
+export async function toggleEntryBillable(fd: FormData): Promise<void> {
+  const entryId = str(fd, 'entryId');
+  const projectId = str(fd, 'projectId');
+  const db = getDb();
+  const [entry] = await db.select().from(timeEntries).where(eq(timeEntries.id, entryId));
+  if (!entry) return;
+  await db
+    .update(timeEntries)
+    .set({ billable: entry.billable === 1 ? 0 : 1 })
+    .where(eq(timeEntries.id, entryId));
+  revalidatePath('/');
+  if (projectId) revalidatePath('/cases/' + projectId);
 }
 
 export async function deleteEntry(fd: FormData): Promise<void> {
@@ -138,6 +307,7 @@ export async function createClient(fd: FormData): Promise<string> {
     currency: str(fd, 'currency') || s.defaultCurrency,
     notes: str(fd, 'notes') || null,
   });
+  await ensureDefaultCase(id);
   revalidatePath('/');
   revalidatePath('/clients');
   return id;
@@ -152,6 +322,14 @@ export async function updateClient(fd: FormData): Promise<void> {
   const id = str(fd, 'id');
   if (!id) throw new Error('Missing client id');
   const db = getDb();
+  const hoursThreshold = numOrNull(fd, 'alertThresholdHours');
+  const amountThreshold = numOrNull(fd, 'alertThresholdAmount');
+  const [existing] = await db.select().from(clients).where(eq(clients.id, id));
+
+  // Moving a threshold re-arms it, so a raised limit can fire again.
+  const rearmHours = existing && existing.alertThresholdHours !== hoursThreshold;
+  const rearmAmount = existing && existing.alertThresholdAmount !== amountThreshold;
+
   await db
     .update(clients)
     .set({
@@ -162,6 +340,10 @@ export async function updateClient(fd: FormData): Promise<void> {
       hourlyRate: num(fd, 'hourlyRate'),
       currency: str(fd, 'currency') || 'ILS',
       notes: str(fd, 'notes') || null,
+      alertThresholdHours: hoursThreshold,
+      alertThresholdAmount: amountThreshold,
+      ...(rearmHours ? { alertNotifiedHours: null } : {}),
+      ...(rearmAmount ? { alertNotifiedAmount: null } : {}),
     })
     .where(eq(clients.id, id));
   revalidatePath('/');
@@ -193,6 +375,7 @@ export async function createProject(fd: FormData): Promise<void> {
     description: str(fd, 'description') || null,
     hourlyRate: numOrNull(fd, 'hourlyRate'),
     alertThresholdHours: numOrNull(fd, 'alertThresholdHours'),
+    alertThresholdAmount: numOrNull(fd, 'alertThresholdAmount'),
   });
   revalidatePath('/');
   revalidatePath('/clients/' + clientId);
@@ -202,12 +385,13 @@ export async function updateProject(fd: FormData): Promise<void> {
   const id = str(fd, 'id');
   const clientId = str(fd, 'clientId');
   if (!id) throw new Error('Missing case id');
-  const newThreshold = numOrNull(fd, 'alertThresholdHours');
+  const hoursThreshold = numOrNull(fd, 'alertThresholdHours');
+  const amountThreshold = numOrNull(fd, 'alertThresholdAmount');
   const db = getDb();
 
-  // Re-arm the alert if the threshold changed, so a new threshold can fire.
   const [existing] = await db.select().from(projects).where(eq(projects.id, id));
-  const rearm = existing && existing.alertThresholdHours !== newThreshold;
+  const rearmHours = existing && existing.alertThresholdHours !== hoursThreshold;
+  const rearmAmount = existing && existing.alertThresholdAmount !== amountThreshold;
 
   await db
     .update(projects)
@@ -216,8 +400,10 @@ export async function updateProject(fd: FormData): Promise<void> {
       caseNumber: str(fd, 'caseNumber') || null,
       description: str(fd, 'description') || null,
       hourlyRate: numOrNull(fd, 'hourlyRate'),
-      alertThresholdHours: newThreshold,
-      ...(rearm ? { alertNotifiedHours: null, alertNotifiedAt: null } : {}),
+      alertThresholdHours: hoursThreshold,
+      alertThresholdAmount: amountThreshold,
+      ...(rearmHours ? { alertNotifiedHours: null } : {}),
+      ...(rearmAmount ? { alertNotifiedAmount: null } : {}),
     })
     .where(eq(projects.id, id));
   revalidatePath('/');
@@ -230,7 +416,10 @@ export async function setProjectStatus(fd: FormData): Promise<void> {
   const clientId = str(fd, 'clientId');
   const status = str(fd, 'status') === 'closed' ? 'closed' : 'open';
   const db = getDb();
-  await db.update(projects).set({ status, closedAt: status === 'closed' ? new Date() : null }).where(eq(projects.id, id));
+  await db
+    .update(projects)
+    .set({ status, closedAt: status === 'closed' ? new Date() : null })
+    .where(eq(projects.id, id));
   revalidatePath('/');
   if (clientId) revalidatePath('/clients/' + clientId);
   revalidatePath('/cases/' + id);
@@ -252,8 +441,7 @@ export async function createTask(fd: FormData): Promise<void> {
   const projectId = str(fd, 'projectId');
   const name = str(fd, 'name');
   if (!projectId || !name) throw new Error('שם משימה נדרש / Task name is required');
-  const db = getDb();
-  await db.insert(tasks).values({ id: newId(), projectId, name });
+  await findOrCreateTask(projectId, name);
   revalidatePath('/cases/' + projectId);
 }
 
@@ -282,7 +470,7 @@ export async function updateSettings(fd: FormData): Promise<void> {
       reportEmail: str(fd, 'reportEmail') || null,
       defaultCurrency: str(fd, 'defaultCurrency') || 'ILS',
       defaultHourlyRate: num(fd, 'defaultHourlyRate'),
-      roundIncrementMin: num(fd, 'roundIncrementMin', 6),
+      roundIncrementMin: Math.max(1, num(fd, 'roundIncrementMin', 6)),
       timezone: str(fd, 'timezone') || 'Asia/Jerusalem',
       locale: str(fd, 'locale') === 'en' ? 'en' : 'he',
       autoSendMonthly: str(fd, 'autoSendMonthly') === '1' ? 1 : 0,
@@ -297,7 +485,13 @@ export async function sendMonthlyNow(fd: FormData): Promise<void> {
   const monthKeyStr = str(fd, 'monthKey');
   if (!monthKeyStr) throw new Error('Pick a month');
   const res = await sendMonthNow(monthKeyStr);
-  if (!res.sent) throw new Error(res.reason === 'no-recipient' ? 'הגדר דוא״ל לקבלת דוחות בהגדרות / Set a report email in Settings' : 'Send failed');
+  if (!res.sent) {
+    throw new Error(
+      res.reason === 'no-recipient'
+        ? 'הגדר דוא״ל לקבלת דוחות בהגדרות / Set a report email in Settings'
+        : 'Send failed',
+    );
+  }
   revalidatePath('/settings');
 }
 
@@ -313,11 +507,12 @@ export async function createInvoice(fd: FormData): Promise<void> {
   if (!clientId) throw new Error('בחר לקוח / Pick a client');
   const projectId = str(fd, 'projectId') || null;
   const includeHours = str(fd, 'includeHours') === '1';
+  const allTime = str(fd, 'allTime') === '1';
   const fromMs = Number(str(fd, 'from')) || 0;
   const toMs = Number(str(fd, 'to')) || Date.now();
   const notes = str(fd, 'notes') || null;
 
-  const hoursLines = includeHours ? await buildHoursLines({ clientId, projectId, fromMs, toMs }) : [];
+  const hoursLines = includeHours ? await buildHoursLines({ clientId, projectId, fromMs, toMs, allTime }) : [];
 
   let manualLines: NewLine[] = [];
   try {
@@ -352,8 +547,8 @@ export async function createInvoice(fd: FormData): Promise<void> {
       const [p] = await tx.select().from(projects).where(eq(projects.id, projectId));
       project = p ?? null;
     }
-    const { id } = await insertInvoice(tx, { client, project, settings: s, lines, subtotal, notes });
-    return id;
+    const created = await insertInvoice(tx, { client, project, settings: s, lines, subtotal, notes });
+    return created.id;
   });
 
   // Best-effort auto-email if the client has an address on file.

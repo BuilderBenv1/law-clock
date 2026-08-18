@@ -119,3 +119,25 @@ function tzOffsetMs(at: Date, timeZone: string): number {
   const asUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'));
   return asUtc - Math.floor(at.getTime() / 1000) * 1000;
 }
+
+/** "09:30" wall-clock time in the given timezone. */
+export function formatTimeOfDay(ms: number, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).format(new Date(ms));
+}
+
+/** Compact duration for pause gaps: "45m", "2h 15m", "3d 4h". */
+export function formatGap(durationMs: number): string {
+  const mins = Math.max(0, Math.round(durationMs / MS_PER_MIN));
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  const rem = mins % 60;
+  if (hours < 24) return rem ? `${hours}h ${rem}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  const remH = hours % 24;
+  return remH ? `${days}d ${remH}h` : `${days}d`;
+}
