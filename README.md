@@ -20,6 +20,17 @@ It replaces the parts of a heavier tool you use every day:
   period **and/or** one-off flat charges (fixed fees). Each invoice carries the
   firm **logo**, the **case number + name**, line items, and a total; print to
   PDF or email it to the client. Mark paid / unpaid.
+- **Pause & resume**: work is a session made of sittings, so pausing never
+  fragments a task or inflates the bill (rounding applies once to the session).
+  Recent sessions resume in one click, and client statements show the breaks.
+- **Non-billed hours**: log work at no charge; it appears as hours worked but
+  never on the bill, and is reported separately.
+- **Money alert per case**: alongside the hours threshold, alert the client when
+  charges reach an amount ("you asked to be told at ₪X — here is that reminder").
+- **Client statement**: summary (rate / worked / charged / total) → per-case
+  breakdown at each case's own rate → per-task breakdown → sitting-level detail.
+  Downloads as a real PDF, or prints.
+- **Reports**: pie charts by case and by task, plus one-click all-time filtering.
 - **Firm logo & case numbers**: upload a logo in Settings (shown on invoices and
   reports); give every case a number, a name, or both.
 

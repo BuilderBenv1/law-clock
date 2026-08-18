@@ -216,7 +216,11 @@ export async function getProjectDetail(projectId: string): Promise<ProjectDetail
   }));
 
   const totalMs = entries.reduce((sum, r) => sum + (r.entry.durationMs ?? 0), 0);
-  const billable = entries.reduce((sum, r) => sum + billableHours(r.entry.durationMs ?? 0, s.roundIncrementMin), 0);
+  // Written-off work still counts as hours worked, but never toward the bill.
+  const billable = entries.reduce(
+    (sum, r) => sum + (r.entry.billable === 1 ? billableHours(r.entry.durationMs ?? 0, s.roundIncrementMin) : 0),
+    0,
+  );
   const rate = effectiveRate(project, client, s.defaultHourlyRate);
   return {
     project,

@@ -69,6 +69,50 @@ export async function sendThresholdAlert(
   return to;
 }
 
+/**
+ * Tell the client their spend on a case has reached the figure they asked to be
+ * warned at. Phrased as the reminder they requested, not as a demand.
+ */
+export async function sendAmountAlert(
+  client: Client,
+  project: Project,
+  amount: number,
+  threshold: number,
+  s: Settings,
+  locale: Locale,
+): Promise<string | null> {
+  const to = client.email || s.reportEmail || s.firmEmail;
+  if (!to) return null;
+
+  const amountStr = money(amount, client.currency, locale);
+  const thresholdStr = money(threshold, client.currency, locale);
+  const caseLabel = [project.caseNumber, project.name].filter(Boolean).join(' · ');
+
+  const heBody = `
+    <h2 style="margin:0 0 12px">תזכורת: סכום החיוב בתיק</h2>
+    <p>שלום ${esc(client.name)},</p>
+    <p>ביקשת לקבל התראה כאשר החיוב בתיק <strong>${esc(caseLabel)}</strong> יגיע ל־<strong>${esc(thresholdStr)}</strong> — זוהי התזכורת.</p>
+    <p>נכון להיום, סך החיוב בתיק עומד על <strong>${esc(amountStr)}</strong>.</p>
+    <p>נשמח לעמוד לרשותך לכל שאלה או הבהרה, ולשלוח דוח שעות מפורט לפי בקשה.</p>
+    <p style="margin-top:20px">בברכה,<br>${esc(s.firmName)}</p>`;
+  const enBody = `
+    <h2 style="margin:0 0 12px">Reminder: charges on your case</h2>
+    <p>Hello ${esc(client.name)},</p>
+    <p>You asked to be told when charges on <strong>${esc(caseLabel)}</strong> reached <strong>${esc(thresholdStr)}</strong> — this is that reminder.</p>
+    <p>Charges on the case currently stand at <strong>${esc(amountStr)}</strong>.</p>
+    <p>We're happy to answer any questions, or send a detailed statement on request.</p>
+    <p style="margin-top:20px">Best regards,<br>${esc(s.firmName)}</p>`;
+
+  const { error } = await resend().emails.send({
+    from: fromAddress(),
+    to,
+    subject: locale === 'he' ? `תזכורת חיוב — ${project.name} (${amountStr})` : `Billing reminder — ${project.name} (${amountStr})`,
+    html: shell(locale, locale === 'he' ? heBody : enBody),
+  });
+  if (error) throw new Error(`Resend send failed: ${error.message ?? 'unknown error'}`);
+  return to;
+}
+
 /** Email an invoice to a recipient — the printable invoice doc is the body. */
 export async function sendInvoiceEmail(detail: InvoiceDetail, to: string, locale: Locale): Promise<void> {
   const inv = detail.invoice;

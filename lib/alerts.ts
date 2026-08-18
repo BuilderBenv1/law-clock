@@ -1,18 +1,22 @@
 import { eq } from 'drizzle-orm';
 import { getDb } from './db';
 import { clients, projects } from './db/schema';
-import { caseHours } from './queries';
+import { caseHours, caseBilledAmount } from './queries';
 import { getSettings, localeOf } from './settings';
-import { sendThresholdAlert } from './email';
+import { sendThresholdAlert, sendAmountAlert } from './email';
 
 /**
- * After work is logged on a case, check whether it has crossed its hours-alert
- * threshold and, if so, email the client — once. `alertNotifiedHours` records
- * the threshold we already fired on, so raising the threshold re-arms the alert
- * but the same threshold never fires twice. Never throws: a failed email must
- * not break stopping a timer.
+ * After work is logged on a case, check whether it has crossed either of its
+ * alert thresholds — hours or money — and if so email the client, once each.
+ * The `alertNotified*` columns record the threshold already fired on, so raising
+ * a threshold re-arms it but the same one never fires twice. Never throws: a
+ * failed email must not break stopping a timer.
  */
 export async function checkThreshold(projectId: string): Promise<void> {
+  await Promise.all([checkHoursThreshold(projectId), checkAmountThreshold(projectId)]);
+}
+
+async function checkHoursThreshold(projectId: string): Promise<void> {
   try {
     const db = getDb();
     const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
@@ -33,6 +37,33 @@ export async function checkThreshold(projectId: string): Promise<void> {
     await db.update(projects).set({ alertNotifiedHours: threshold, alertNotifiedAt: new Date() }).where(eq(projects.id, projectId));
     await sendThresholdAlert(client, project, hours, threshold, s, localeOf(s));
   } catch (e) {
-    console.error('threshold alert failed', e);
+    console.error('hours threshold alert failed', e);
+  }
+}
+
+/** "You asked to be told when you'd spent X — here is that reminder." */
+async function checkAmountThreshold(projectId: string): Promise<void> {
+  try {
+    const db = getDb();
+    const [project] = await db.select().from(projects).where(eq(projects.id, projectId));
+    if (!project || project.alertThresholdAmount == null || project.alertThresholdAmount <= 0) return;
+
+    const threshold = project.alertThresholdAmount;
+    if (project.alertNotifiedAmount != null && project.alertNotifiedAmount >= threshold) return;
+
+    const amount = await caseBilledAmount(projectId);
+    if (amount < threshold) return;
+
+    const [client] = await db.select().from(clients).where(eq(clients.id, project.clientId));
+    if (!client) return;
+    const s = await getSettings();
+
+    await db
+      .update(projects)
+      .set({ alertNotifiedAmount: threshold, alertAmountNotifiedAt: new Date() })
+      .where(eq(projects.id, projectId));
+    await sendAmountAlert(client, project, amount, threshold, s, localeOf(s));
+  } catch (e) {
+    console.error('amount threshold alert failed', e);
   }
 }

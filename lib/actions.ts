@@ -277,6 +277,7 @@ export async function createProject(fd: FormData): Promise<void> {
     description: str(fd, 'description') || null,
     hourlyRate: numOrNull(fd, 'hourlyRate'),
     alertThresholdHours: numOrNull(fd, 'alertThresholdHours'),
+    alertThresholdAmount: numOrNull(fd, 'alertThresholdAmount'),
   });
   revalidatePath('/');
   revalidatePath('/clients/' + clientId);
@@ -287,11 +288,13 @@ export async function updateProject(fd: FormData): Promise<void> {
   const clientId = str(fd, 'clientId');
   if (!id) throw new Error('Missing case id');
   const newThreshold = numOrNull(fd, 'alertThresholdHours');
+  const newAmount = numOrNull(fd, 'alertThresholdAmount');
   const db = getDb();
 
-  // Re-arm the alert if the threshold changed, so a new threshold can fire.
+  // Re-arm an alert if its threshold changed, so a new threshold can fire.
   const [existing] = await db.select().from(projects).where(eq(projects.id, id));
-  const rearm = existing && existing.alertThresholdHours !== newThreshold;
+  const rearmHours = existing && existing.alertThresholdHours !== newThreshold;
+  const rearmAmount = existing && existing.alertThresholdAmount !== newAmount;
 
   await db
     .update(projects)
@@ -301,7 +304,9 @@ export async function updateProject(fd: FormData): Promise<void> {
       description: str(fd, 'description') || null,
       hourlyRate: numOrNull(fd, 'hourlyRate'),
       alertThresholdHours: newThreshold,
-      ...(rearm ? { alertNotifiedHours: null, alertNotifiedAt: null } : {}),
+      alertThresholdAmount: newAmount,
+      ...(rearmHours ? { alertNotifiedHours: null, alertNotifiedAt: null } : {}),
+      ...(rearmAmount ? { alertNotifiedAmount: null, alertAmountNotifiedAt: null } : {}),
     })
     .where(eq(projects.id, id));
   revalidatePath('/');
