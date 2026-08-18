@@ -61,6 +61,16 @@ export const projects = pgTable(
     /** The threshold value already alerted on (dedupe guard); null = not yet. */
     alertNotifiedHours: doublePrecision('alert_notified_hours'),
     alertNotifiedAt: timestamp('alert_notified_at', { withTimezone: true }),
+    /** Notify the client once billed value reaches this amount; null = no alert. */
+    alertThresholdAmount: doublePrecision('alert_threshold_amount'),
+    /** The amount threshold already alerted on (dedupe guard). */
+    alertNotifiedAmount: doublePrecision('alert_notified_amount'),
+    alertAmountNotifiedAt: timestamp('alert_amount_notified_at', { withTimezone: true }),
+    /**
+     * The client's catch-all case, auto-created with the client. Work can be
+     * tracked without choosing a case, and lands here.
+     */
+    isDefault: integer('is_default').notNull().default(0),
     archived: integer('archived').notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     closedAt: timestamp('closed_at', { withTimezone: true }),
@@ -84,9 +94,11 @@ export const tasks = pgTable(
 );
 
 /**
- * One stretch of tracked work — the output of "start timer / stop timer", or a
- * manual entry. `endMs` NULL means the timer is still running; `durationMs` is
- * filled in when it stops. Client and project are denormalized so hours
+ * One piece of billable work on a case — a "task session". It can be worked in
+ * several sittings: each sitting is a row in `entrySegments`, so pausing and
+ * resuming does not fragment the work. `durationMs` is the sum of the segments,
+ * and billing rounding is applied once to that total (rounding each fragment
+ * would over-bill every pause). Client and project are denormalized so hours
  * aggregate without joins and survive a task rename.
  */
 export const timeEntries = pgTable(
@@ -102,17 +114,41 @@ export const timeEntries = pgTable(
     taskId: text('task_id').references(() => tasks.id, { onDelete: 'set null' }),
     description: text('description'),
     startMs: bigint('start_ms', { mode: 'number' }).notNull(),
-    /** NULL while the timer runs. */
+    /** NULL until the work is finished for good (running or paused). */
     endMs: bigint('end_ms', { mode: 'number' }),
-    /** Milliseconds of work; NULL while running, set on stop / on manual entry. */
+    /** Total worked ms across all segments, excluding paused gaps. */
     durationMs: bigint('duration_ms', { mode: 'number' }),
+    /** 'running' (clock ticking) | 'paused' (resumable) | 'stopped' (done). */
+    status: text('status').notNull().default('stopped'),
+    /** 0 = logged but not charged (pro bono, write-off, internal). */
+    billable: integer('billable').notNull().default(1),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
     clientIdx: index('entry_client_idx').on(t.clientId),
     projectIdx: index('entry_project_idx').on(t.projectId),
     startIdx: index('entry_start_idx').on(t.startMs),
+    statusIdx: index('entry_status_idx').on(t.status),
   }),
+);
+
+/**
+ * One continuous sitting within a task session. Closing a segment is a pause;
+ * opening a new one is a resume. The gaps between consecutive segments are the
+ * pause gaps shown on client-facing statements.
+ */
+export const entrySegments = pgTable(
+  'entry_segments',
+  {
+    id: serial('id').primaryKey(),
+    entryId: text('entry_id')
+      .notNull()
+      .references(() => timeEntries.id, { onDelete: 'cascade' }),
+    startMs: bigint('start_ms', { mode: 'number' }).notNull(),
+    /** NULL while this sitting is actively running. */
+    endMs: bigint('end_ms', { mode: 'number' }),
+  },
+  (t) => ({ entryIdx: index('segment_entry_idx').on(t.entryId) }),
 );
 
 /** Singleton settings row (id = 1). */
@@ -199,6 +235,7 @@ export type Client = typeof clients.$inferSelect;
 export type Project = typeof projects.$inferSelect;
 export type Task = typeof tasks.$inferSelect;
 export type TimeEntry = typeof timeEntries.$inferSelect;
+export type EntrySegment = typeof entrySegments.$inferSelect;
 export type Settings = typeof settings.$inferSelect;
 export type Invoice = typeof invoices.$inferSelect;
 export type InvoiceLine = typeof invoiceLines.$inferSelect;

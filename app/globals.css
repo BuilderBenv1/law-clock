@@ -41,6 +41,9 @@ body {
   .btn-green {
     @apply btn bg-emerald-600 hover:bg-emerald-500 text-white;
   }
+  .btn-amber {
+    @apply btn bg-amber-600 hover:bg-amber-500 text-white;
+  }
   .pill {
     @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
   }

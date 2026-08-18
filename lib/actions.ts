@@ -4,7 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { and, eq, isNull } from 'drizzle-orm';
 import { getDb } from './db';
-import { clients, projects, tasks, timeEntries, settings, invoices } from './db/schema';
+import { clients, projects, tasks, timeEntries, entrySegments, settings, invoices } from './db/schema';
 import { getSettings, localeOf } from './settings';
 import { newId, round2 } from './util';
 import { checkThreshold } from './alerts';
@@ -19,6 +19,16 @@ import {
   type NewLine,
 } from './invoice-service';
 import { sendInvoiceEmail } from './email';
+import {
+  startSession,
+  pauseSession,
+  resumeSession,
+  stopSession,
+  stopAllActive,
+  findOrCreateTask,
+  setEntryBillable,
+} from './timer-service';
+import { createClientWithDefaultCase, ensureDefaultCase } from './case-service';
 
 function str(fd: FormData, key: string): string {
   return String(fd.get(key) ?? '').trim();
@@ -42,73 +52,105 @@ function dateToMs(dateStr: string): number {
 
 // ------------------------- Timer -------------------------
 
+function revalidateTracking(clientId?: string, projectId?: string): void {
+  revalidatePath('/');
+  if (clientId) revalidatePath('/clients/' + clientId);
+  if (projectId) revalidatePath('/cases/' + projectId);
+}
+
 /**
- * Start a timer. Enforces a single running timer: any currently-running entry
- * is stopped (and its case threshold checked) before the new one begins.
+ * Start tracking. The case is optional — without one the work lands in the
+ * client's catch-all case, so you never have to stop and set up a case first.
+ * The free-text title doubles as the task name, which is what makes repeated
+ * work group together in reports.
  */
 export async function startTimer(fd: FormData): Promise<void> {
   const clientId = str(fd, 'clientId');
-  const projectId = str(fd, 'projectId');
-  if (!clientId || !projectId) throw new Error('בחר לקוח ותיק / Pick a client and a case');
-  const taskId = str(fd, 'taskId') || null;
-  const description = str(fd, 'description') || null;
-  const db = getDb();
-  const now = Date.now();
+  if (!clientId) throw new Error('בחר לקוח / Pick a client');
+  const s = await getSettings();
+  let projectId = str(fd, 'projectId');
+  if (!projectId) projectId = (await ensureDefaultCase(clientId, localeOf(s))).id;
 
-  // Stop any running timers first.
-  const running = await db.select().from(timeEntries).where(isNull(timeEntries.endMs));
-  for (const r of running) {
-    await db.update(timeEntries).set({ endMs: now, durationMs: Math.max(0, now - r.startMs) }).where(eq(timeEntries.id, r.id));
-  }
-  for (const r of running) await checkThreshold(r.projectId);
+  const title = str(fd, 'title') || str(fd, 'description');
+  const { stoppedProjects } = await startSession({ clientId, projectId, title });
+  for (const p of stoppedProjects) await checkThreshold(p);
+  revalidateTracking(clientId, projectId);
+}
 
-  await db.insert(timeEntries).values({ id: newId(), clientId, projectId, taskId, description, startMs: now, endMs: null, durationMs: null });
-  revalidatePath('/');
+export async function pauseTimer(fd: FormData): Promise<void> {
+  const entryId = str(fd, 'entryId');
+  if (!entryId) throw new Error('Missing entry id');
+  await pauseSession(entryId);
+  revalidateTracking();
+}
+
+/** Resume a paused session, or pick a finished one back up from the list. */
+export async function resumeTimer(fd: FormData): Promise<void> {
+  const entryId = str(fd, 'entryId');
+  if (!entryId) throw new Error('Missing entry id');
+  await resumeSession(entryId);
+  revalidateTracking();
 }
 
 export async function stopTimer(fd: FormData): Promise<void> {
   const entryId = str(fd, 'entryId');
   if (!entryId) throw new Error('Missing entry id');
-  const db = getDb();
-  const now = Date.now();
-  const [entry] = await db.select().from(timeEntries).where(eq(timeEntries.id, entryId));
-  if (!entry || entry.endMs != null) {
-    revalidatePath('/');
-    return;
-  }
-  await db.update(timeEntries).set({ endMs: now, durationMs: Math.max(0, now - entry.startMs) }).where(eq(timeEntries.id, entryId));
-  await checkThreshold(entry.projectId);
-  revalidatePath('/');
-  revalidatePath('/clients/' + entry.clientId);
-  revalidatePath('/cases/' + entry.projectId);
+  const projectId = await stopSession(entryId);
+  if (projectId) await checkThreshold(projectId);
+  revalidateTracking(str(fd, 'clientId'), projectId ?? undefined);
 }
 
-/** Discard a running timer without recording any time. */
+/** Discard the live session without recording any time. */
 export async function cancelTimer(fd: FormData): Promise<void> {
   const entryId = str(fd, 'entryId');
   const db = getDb();
   await db.delete(timeEntries).where(and(eq(timeEntries.id, entryId), isNull(timeEntries.endMs)));
-  revalidatePath('/');
+  revalidateTracking();
+}
+
+/** Mark a logged session as charged or not charged. */
+export async function toggleEntryBillable(fd: FormData): Promise<void> {
+  const entryId = str(fd, 'entryId');
+  if (!entryId) throw new Error('Missing entry id');
+  await setEntryBillable(entryId, str(fd, 'billable') === '1');
+  revalidateTracking(str(fd, 'clientId'), str(fd, 'projectId'));
 }
 
 /** Add a completed entry by hand (past work, phone calls, etc.). */
 export async function addManualEntry(fd: FormData): Promise<void> {
   const clientId = str(fd, 'clientId');
-  const projectId = str(fd, 'projectId');
-  if (!clientId || !projectId) throw new Error('Pick a client and a case');
+  if (!clientId) throw new Error('Pick a client');
+  const s = await getSettings();
+  let projectId = str(fd, 'projectId');
+  if (!projectId) projectId = (await ensureDefaultCase(clientId, localeOf(s))).id;
+
   const hours = num(fd, 'hours');
   if (!(hours > 0)) throw new Error('שעות חייבות להיות גדולות מאפס / Hours must be greater than zero');
-  const taskId = str(fd, 'taskId') || null;
-  const description = str(fd, 'description') || null;
+  const title = str(fd, 'title') || str(fd, 'description');
+  const taskId = title ? await findOrCreateTask(projectId, title) : str(fd, 'taskId') || null;
   const dateStr = str(fd, 'date');
   const startMs = dateStr ? dateToMs(dateStr) : Date.now();
   const durationMs = Math.round(hours * 3_600_000);
+  const billable = str(fd, 'billable') === '0' ? 0 : 1;
+
   const db = getDb();
-  await db.insert(timeEntries).values({ id: newId(), clientId, projectId, taskId, description, startMs, endMs: startMs + durationMs, durationMs });
+  const id = newId();
+  await db.insert(timeEntries).values({
+    id,
+    clientId,
+    projectId,
+    taskId,
+    description: title || null,
+    startMs,
+    endMs: startMs + durationMs,
+    durationMs,
+    status: 'stopped',
+    billable,
+  });
+  // A manual entry is one uninterrupted sitting.
+  await db.insert(entrySegments).values({ entryId: id, startMs, endMs: startMs + durationMs });
   await checkThreshold(projectId);
-  revalidatePath('/');
-  revalidatePath('/clients/' + clientId);
-  revalidatePath('/cases/' + projectId);
+  revalidateTracking(clientId, projectId);
 }
 
 export async function deleteEntry(fd: FormData): Promise<void> {
@@ -126,21 +168,63 @@ export async function createClient(fd: FormData): Promise<string> {
   const name = str(fd, 'name');
   if (!name) throw new Error('שם לקוח נדרש / Client name is required');
   const s = await getSettings();
-  const id = newId();
-  const db = getDb();
-  await db.insert(clients).values({
-    id,
-    name,
-    email: str(fd, 'email') || null,
-    phone: str(fd, 'phone') || null,
-    address: str(fd, 'address') || null,
-    hourlyRate: num(fd, 'hourlyRate'),
-    currency: str(fd, 'currency') || s.defaultCurrency,
-    notes: str(fd, 'notes') || null,
-  });
+  const { clientId } = await createClientWithDefaultCase(
+    {
+      name,
+      email: str(fd, 'email') || null,
+      phone: str(fd, 'phone') || null,
+      address: str(fd, 'address') || null,
+      hourlyRate: num(fd, 'hourlyRate'),
+      currency: str(fd, 'currency') || s.defaultCurrency,
+      notes: str(fd, 'notes') || null,
+    },
+    localeOf(s),
+  );
   revalidatePath('/');
   revalidatePath('/clients');
-  return id;
+  return clientId;
+}
+
+export interface QuickCreated {
+  id: string;
+  name: string;
+  /** For a client: the catch-all case created alongside it. */
+  defaultProjectId?: string;
+}
+
+/**
+ * Create a client from inside a dropdown, without leaving the timer. Returns
+ * the new ids so the caller can select it immediately.
+ */
+export async function quickCreateClient(name: string): Promise<QuickCreated> {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error('שם לקוח נדרש / Client name is required');
+  const s = await getSettings();
+  const { clientId, defaultProjectId } = await createClientWithDefaultCase(
+    { name: trimmed, currency: s.defaultCurrency, hourlyRate: s.defaultHourlyRate },
+    localeOf(s),
+  );
+  revalidatePath('/');
+  revalidatePath('/clients');
+  return { id: clientId, name: trimmed, defaultProjectId };
+}
+
+/** Create a case from inside a dropdown. */
+export async function quickCreateCase(clientId: string, name: string, caseNumber?: string): Promise<QuickCreated> {
+  const trimmed = name.trim();
+  if (!clientId) throw new Error('בחר לקוח / Pick a client first');
+  if (!trimmed) throw new Error('שם תיק נדרש / Case name is required');
+  const db = getDb();
+  const id = newId();
+  await db.insert(projects).values({
+    id,
+    clientId,
+    name: trimmed,
+    caseNumber: caseNumber?.trim() || null,
+  });
+  revalidatePath('/');
+  revalidatePath('/clients/' + clientId);
+  return { id, name: trimmed };
 }
 
 export async function createClientAndRedirect(fd: FormData): Promise<void> {

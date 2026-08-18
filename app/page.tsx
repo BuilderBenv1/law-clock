@@ -1,14 +1,11 @@
 import Link from 'next/link';
-import { TimerWidget } from '@/components/timer-widget';
+import { TimerWidget, type ActiveProps } from '@/components/timer-widget';
 import { getSettings, localeOf } from '@/lib/settings';
 import { t } from '@/lib/i18n';
-import {
-  getClientsTree,
-  getRunningTimer,
-  hoursInWindow,
-  activeCasesWithHours,
-  recentEntries,
-} from '@/lib/queries';
+import { getClientsTree, hoursInWindow, activeCasesWithHours, recentEntries } from '@/lib/queries';
+import { getActiveSession } from '@/lib/timer-service';
+import { taskSuggestionsByClient } from '@/lib/case-service';
+import { resumeTimer } from '@/lib/actions';
 import { startOfDayMs, startOfWeekMs, startOfMonthMs, formatHm } from '@/lib/time';
 import { formatDate } from '@/lib/format';
 
@@ -19,9 +16,10 @@ export default async function DashboardPage() {
   const locale = localeOf(s);
   const now = Date.now();
 
-  const [tree, running, todayH, weekH, monthH, cases, recent] = await Promise.all([
+  const [tree, active, suggestions, todayH, weekH, monthH, cases, recent] = await Promise.all([
     getClientsTree(),
-    getRunningTimer(),
+    getActiveSession(),
+    taskSuggestionsByClient(),
     hoursInWindow(startOfDayMs(now, s.timezone), now + 1),
     hoursInWindow(startOfWeekMs(now, s.timezone), now + 1),
     hoursInWindow(startOfMonthMs(now, s.timezone), now + 1),
@@ -29,13 +27,16 @@ export default async function DashboardPage() {
     recentEntries(12),
   ]);
 
-  const runningProps = running
+  const activeProps: ActiveProps | null = active
     ? {
-        entryId: running.entry.id,
-        startMs: running.entry.startMs,
-        clientName: running.clientName,
-        projectName: running.projectName,
-        taskName: running.taskName,
+        entryId: active.entry.id,
+        status: active.entry.status === 'running' ? 'running' : 'paused',
+        bankedMs: active.bankedMs,
+        liveSinceMs: active.liveSinceMs,
+        clientName: active.clientName,
+        projectName: active.projectName,
+        taskName: active.taskName ?? active.entry.description,
+        sittings: active.segments.length,
       }
     : null;
 
@@ -48,7 +49,7 @@ export default async function DashboardPage() {
         </Link>
       </div>
 
-      <TimerWidget tree={tree} running={runningProps} locale={locale} />
+      <TimerWidget tree={tree} active={activeProps} suggestions={suggestions} serverNowMs={now} locale={locale} />
 
       <div className="grid grid-cols-3 gap-4">
         <Stat label={t(locale, 'today')} value={todayH} />
@@ -103,8 +104,27 @@ export default async function DashboardPage() {
                     <span className="text-slate-500">{formatDate(r.entry.startMs, s.timezone, locale)} · </span>
                     {r.clientName} · {r.projectName}
                     {r.taskName ? <span className="text-slate-500"> · {r.taskName}</span> : null}
+                    {r.entry.status === 'paused' ? (
+                      <span className="pill bg-amber-950 text-amber-300 ms-2">{t(locale, 'paused')}</span>
+                    ) : null}
+                    {r.entry.billable === 0 ? (
+                      <span className="pill bg-slate-800 text-slate-400 ms-2">{t(locale, 'unbilled')}</span>
+                    ) : null}
                   </span>
-                  <span className="num text-slate-300 shrink-0">{formatHm(r.entry.durationMs ?? 0)}</span>
+                  <span className="flex items-center gap-2 shrink-0">
+                    <span className="num text-slate-300">{formatHm(r.entry.durationMs ?? 0)}</span>
+                    {/* Carry on with this task — the gap becomes a visible break. */}
+                    <form action={resumeTimer}>
+                      <input type="hidden" name="entryId" value={r.entry.id} />
+                      <button
+                        type="submit"
+                        className="text-slate-500 hover:text-emerald-400 text-xs"
+                        title={t(locale, 'resumeTask')}
+                      >
+                        ▶
+                      </button>
+                    </form>
+                  </span>
                 </li>
               ))}
             </ul>
