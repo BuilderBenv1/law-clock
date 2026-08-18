@@ -1,7 +1,7 @@
 import { auth } from '@/lib/auth';
 import { buildReport } from '@/lib/queries';
 import { getSettings, localeOf } from '@/lib/settings';
-import { reportToHtml } from '@/lib/report-format';
+import { renderStatementHtml } from '@/lib/statement-doc';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -16,14 +16,15 @@ export async function GET(req: Request): Promise<Response> {
   const projectId = url.searchParams.get('projectId') || null;
   const from = Number(url.searchParams.get('from'));
   const to = Number(url.searchParams.get('to'));
+  const allTime = url.searchParams.get('allTime') === '1';
   if (!clientId || !Number.isFinite(from) || !Number.isFinite(to)) {
     return new Response('bad request', { status: 400 });
   }
 
   const s = await getSettings();
-  const report = await buildReport({ clientId, projectId, fromMs: from, toMs: to });
+  const report = await buildReport({ clientId, projectId, fromMs: from, toMs: to, allTime });
   if (!report) return new Response('not found', { status: 404 });
 
-  const html = reportToHtml(report, s, localeOf(s), { standalone: true });
+  const html = renderStatementHtml(report, s, localeOf(s), { standalone: true });
   return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' } });
 }

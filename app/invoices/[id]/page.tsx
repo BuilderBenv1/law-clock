@@ -6,6 +6,7 @@ import { localeOf } from '@/lib/settings';
 import { t } from '@/lib/i18n';
 import { formatDate } from '@/lib/format';
 import { markInvoicePaidAction, markInvoiceUnpaidAction, deleteInvoiceAction, emailInvoiceAction } from '@/lib/actions';
+import { DownloadPdfButton } from '@/components/download-pdf-button';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,8 +35,14 @@ export default async function InvoicePage({ params }: { params: Promise<{ id: st
           ) : null}
         </div>
         <div className="flex gap-2 flex-wrap">
+          <DownloadPdfButton
+            targetId="invoice-doc"
+            filename={`invoice-${inv.number}`}
+            label={t(locale, 'downloadPdf')}
+            className="btn-ghost"
+          />
           <a href={`/invoices/${inv.id}/print`} target="_blank" className="btn-ghost">
-            🖶 {t(locale, 'downloadPdf')}
+            🖶 {t(locale, 'printDoc')}
           </a>
           {inv.status === 'paid' ? (
             <form action={markInvoiceUnpaidAction}>

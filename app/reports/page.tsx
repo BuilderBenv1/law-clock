@@ -1,7 +1,10 @@
 import { ReportForm, type ReportFormClient } from '@/components/report-form';
+import { PieChart } from '@/components/pie-chart';
+import { DownloadPdfButton } from '@/components/download-pdf-button';
 import { getSettings, localeOf } from '@/lib/settings';
 import { t } from '@/lib/i18n';
 import { buildReport, getClientsTree } from '@/lib/queries';
+import { renderStatementHtml } from '@/lib/statement-doc';
 import { money, formatDate } from '@/lib/format';
 import { startOfMonthMs } from '@/lib/time';
 
@@ -20,6 +23,7 @@ export default async function ReportsPage({
   const one = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v) ?? '';
   const clientId = one(sp.clientId);
   const projectId = one(sp.projectId) || null;
+  const allTime = one(sp.allTime) === '1';
   const fromMs = Number(one(sp.from)) || startOfMonthMs(now, s.timezone);
   const toMs = Number(one(sp.to)) || now + 1;
 
@@ -27,23 +31,34 @@ export default async function ReportsPage({
   const clients: ReportFormClient[] = tree.map((c) => ({
     id: c.id,
     name: c.name,
-    projects: c.projects.map((p) => ({ id: p.id, name: p.name })),
+    projects: c.projects.map((p) => ({ id: p.id, name: p.caseNumber ? `${p.caseNumber} · ${p.name}` : p.name })),
   }));
 
-  const report = clientId ? await buildReport({ clientId, projectId, fromMs, toMs }) : null;
+  const report = clientId ? await buildReport({ clientId, projectId, fromMs, toMs, allTime }) : null;
 
-  const csvHref = report
-    ? `/api/reports/csv?clientId=${clientId}${projectId ? `&projectId=${projectId}` : ''}&from=${fromMs}&to=${toMs}`
-    : '#';
-  const printHref = report
-    ? `/reports/print?clientId=${clientId}${projectId ? `&projectId=${projectId}` : ''}&from=${fromMs}&to=${toMs}`
-    : '#';
+  const qs = () => {
+    const q = new URLSearchParams({ clientId, from: String(fromMs), to: String(toMs) });
+    if (projectId) q.set('projectId', projectId);
+    if (allTime) q.set('allTime', '1');
+    return q.toString();
+  };
+  const csvHref = report ? `/api/reports/csv?${qs()}` : '#';
+  const printHref = report ? `/reports/print?${qs()}` : '#';
+
+  const statementHtml = report ? renderStatementHtml(report, s, locale) : '';
+  const fileName = report
+    ? `statement-${report.client.name}-${report.allTime ? 'all-time' : new Date(fromMs).toISOString().slice(0, 10)}`
+    : 'statement';
 
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-semibold">{t(locale, 'reports')}</h1>
 
-      <ReportForm clients={clients} locale={locale} initial={{ clientId, projectId: projectId ?? '', fromMs, toMs }} />
+      <ReportForm
+        clients={clients}
+        locale={locale}
+        initial={{ clientId, projectId: projectId ?? '', fromMs, toMs, allTime }}
+      />
 
       {report && (
         <div className="space-y-6">
@@ -54,51 +69,62 @@ export default async function ReportsPage({
                 <span className="text-slate-500"> · {report.project ? report.project.name : t(locale, 'allCases')}</span>
               </h2>
               <div className="text-xs text-slate-500">
-                {formatDate(report.fromMs, s.timezone, locale)} – {formatDate(report.toMs - 1, s.timezone, locale)}
+                {report.allTime
+                  ? t(locale, 'allTime')
+                  : `${formatDate(report.fromMs, s.timezone, locale)} – ${formatDate(report.toMs - 1, s.timezone, locale)}`}
               </div>
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap items-center">
               <a href={csvHref} className="btn-ghost">
                 ⭳ {t(locale, 'exportCsv')}
               </a>
-              <a href={printHref} target="_blank" className="btn-primary">
-                🖶 {t(locale, 'print')}
+              <a href={printHref} target="_blank" className="btn-ghost">
+                🖶 {t(locale, 'printDoc')}
               </a>
+              <DownloadPdfButton targetId="statement-doc" filename={fileName} label={t(locale, 'downloadPdf')} />
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
-            <Stat label={t(locale, 'totalHours')} value={report.totalHours.toFixed(2)} />
-            <Stat label={t(locale, 'billableHours')} value={report.totalBillable.toFixed(2)} />
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Stat label={t(locale, 'worked')} value={report.totalHours.toFixed(2)} />
+            <Stat label={t(locale, 'charged')} value={report.totalBillable.toFixed(2)} />
+            <Stat label={t(locale, 'unbilledHours')} value={report.unbilledHours.toFixed(2)} dim />
             <Stat label={t(locale, 'amount')} value={money(report.amount, report.currency, locale)} highlight />
           </div>
+
+          {report.totalBillable !== report.totalHours && (
+            <p className="text-xs text-slate-500">
+              {locale === 'he'
+                ? `שעות לחיוב מעוגלות כלפי מעלה למקטעים של ${s.roundIncrementMin} דקות — לכן הן שונות מסך השעות בפועל.`
+                : `Charged hours are rounded up to ${s.roundIncrementMin}-minute increments, which is why they differ from hours worked.`}
+            </p>
+          )}
 
           {report.entries.length === 0 ? (
             <p className="text-slate-500">{t(locale, 'noData')}</p>
           ) : (
             <>
-              <section>
-                <h3 className="font-semibold mb-2">{t(locale, 'byTask')}</h3>
-                <Table
-                  head={[t(locale, 'task'), t(locale, 'hours'), t(locale, 'billableHours')]}
-                  rows={report.byTask.map((b) => [b.label, b.hours.toFixed(2), b.billable.toFixed(2)])}
-                  numCols={[1, 2]}
+              <div className="grid gap-4 md:grid-cols-2">
+                <PieChart
+                  title={t(locale, 'breakdownByCase')}
+                  unit={t(locale, 'hours')}
+                  locale={locale}
+                  slices={report.byCase.map((c) => ({ label: c.label, value: c.hours }))}
                 />
-              </section>
+                <PieChart
+                  title={t(locale, 'byTask')}
+                  unit={t(locale, 'hours')}
+                  locale={locale}
+                  slices={report.byTask.map((b) => ({ label: b.label, value: b.hours }))}
+                />
+              </div>
 
+              {/* The client-facing document, exactly as it downloads and prints. */}
               <section>
-                <h3 className="font-semibold mb-2">{t(locale, 'detailed')}</h3>
-                <Table
-                  head={[t(locale, 'date'), t(locale, 'task'), t(locale, 'description'), t(locale, 'hours'), t(locale, 'billableHours')]}
-                  rows={report.entries.map((e) => [
-                    formatDate(e.startMs, s.timezone, locale),
-                    e.taskName ?? '—',
-                    e.description ?? '',
-                    e.hours.toFixed(2),
-                    e.billable.toFixed(2),
-                  ])}
-                  numCols={[3, 4]}
-                />
+                <h3 className="font-semibold mb-2">{t(locale, 'statement')}</h3>
+                <div className="rounded-xl overflow-hidden border border-slate-800 bg-white text-black">
+                  <div dangerouslySetInnerHTML={{ __html: statementHtml }} />
+                </div>
               </section>
             </>
           )}
@@ -108,41 +134,13 @@ export default async function ReportsPage({
   );
 }
 
-function Stat({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+function Stat({ label, value, highlight, dim }: { label: string; value: string; highlight?: boolean; dim?: boolean }) {
   return (
     <div className="card">
       <div className="text-xs uppercase tracking-wide text-slate-400">{label}</div>
-      <div className={`num text-2xl font-bold mt-1 ${highlight ? 'text-emerald-300' : ''}`}>{value}</div>
-    </div>
-  );
-}
-
-function Table({ head, rows, numCols }: { head: string[]; rows: string[][]; numCols: number[] }) {
-  const numSet = new Set(numCols);
-  return (
-    <div className="card p-0 overflow-hidden">
-      <table className="w-full text-sm">
-        <thead className="bg-slate-900/50 text-slate-400 text-xs">
-          <tr>
-            {head.map((h, i) => (
-              <th key={i} className={`p-3 ${numSet.has(i) ? 'text-end' : 'text-start'}`}>
-                {h}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r, ri) => (
-            <tr key={ri} className="border-t border-slate-800">
-              {r.map((c, ci) => (
-                <td key={ci} className={`p-3 ${numSet.has(ci) ? 'text-end num' : 'text-start'}`}>
-                  {c}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <div className={`num text-2xl font-bold mt-1 ${highlight ? 'text-emerald-300' : dim ? 'text-slate-500' : ''}`}>
+        {value}
+      </div>
     </div>
   );
 }

@@ -24,32 +24,40 @@ export function ReportForm({
 }: {
   clients: ReportFormClient[];
   locale: Locale;
-  initial: { clientId: string; projectId: string; fromMs: number; toMs: number };
+  initial: { clientId: string; projectId: string; fromMs: number; toMs: number; allTime?: boolean };
 }) {
   const router = useRouter();
   const [clientId, setClientId] = useState(initial.clientId);
   const [projectId, setProjectId] = useState(initial.projectId);
   const [from, setFrom] = useState(toDateInput(initial.fromMs));
   const [to, setTo] = useState(toDateInput(initial.toMs - 1));
+  const [allTime, setAllTime] = useState(!!initial.allTime);
 
   const projects = useMemo(() => clients.find((c) => c.id === clientId)?.projects ?? [], [clients, clientId]);
 
-  function go(e: React.FormEvent) {
-    e.preventDefault();
+  function push(useAllTime: boolean) {
     if (!clientId) return;
     const fromMs = new Date(`${from}T00:00:00`).getTime();
     const toMs = new Date(`${to}T00:00:00`).getTime() + 24 * 3600 * 1000;
     const q = new URLSearchParams({ clientId, from: String(fromMs), to: String(toMs) });
     if (projectId) q.set('projectId', projectId);
+    if (useAllTime) q.set('allTime', '1');
     router.push(`/reports?${q.toString()}`);
   }
 
+  function go(e: React.FormEvent) {
+    e.preventDefault();
+    push(allTime);
+  }
+
+  /** Picking a range implies you no longer want the unbounded view. */
   function setMonth(offset: number) {
     const now = new Date();
     const first = new Date(now.getFullYear(), now.getMonth() + offset, 1);
     const last = new Date(now.getFullYear(), now.getMonth() + offset + 1, 0);
     setFrom(toDateInput(first.getTime()));
     setTo(toDateInput(last.getTime()));
+    setAllTime(false);
   }
 
   return (
@@ -86,15 +94,31 @@ export function ReportForm({
       </div>
       <div>
         <label className="label">{t(locale, 'from')}</label>
-        <input type="date" className="input" value={from} onChange={(e) => setFrom(e.target.value)} />
+        <input
+          type="date"
+          className="input"
+          value={from}
+          disabled={allTime}
+          onChange={(e) => setFrom(e.target.value)}
+        />
       </div>
       <div>
         <label className="label">{t(locale, 'to')}</label>
-        <input type="date" className="input" value={to} onChange={(e) => setTo(e.target.value)} />
+        <input type="date" className="input" value={to} disabled={allTime} onChange={(e) => setTo(e.target.value)} />
       </div>
       <div className="md:col-span-4 flex items-center gap-2 flex-wrap">
         <button type="submit" className="btn-primary">
           {t(locale, 'report')}
+        </button>
+        <button
+          type="button"
+          className={allTime ? 'btn-green' : 'btn-ghost'}
+          onClick={() => {
+            setAllTime(true);
+            push(true);
+          }}
+        >
+          ∞ {t(locale, 'allTime')}
         </button>
         <button type="button" className="btn-ghost" onClick={() => setMonth(0)}>
           {t(locale, 'thisMonth')}
@@ -102,6 +126,11 @@ export function ReportForm({
         <button type="button" className="btn-ghost" onClick={() => setMonth(-1)}>
           {locale === 'he' ? 'חודש שעבר' : 'Last month'}
         </button>
+        {allTime ? (
+          <span className="text-xs text-emerald-400">
+            {locale === 'he' ? 'מציג את כל הזמן — טווח התאריכים מבוטל' : 'Showing all time — date range ignored'}
+          </span>
+        ) : null}
       </div>
     </form>
   );

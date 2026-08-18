@@ -39,7 +39,7 @@ export function renderInvoiceHtml(detail: InvoiceDetail, locale: Locale, opts: {
     : `<div class="firm-name">${esc(inv.firmName || t(locale, 'firmName'))}</div>`;
 
   const body = `
-  <div class="doc" dir="${dirAttr}" style="text-align:${align}">
+  <div class="doc" id="invoice-doc" dir="${dirAttr}" style="text-align:${align}">
     <div class="head">
       <div class="brand">
         ${logo}
