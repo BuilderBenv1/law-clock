@@ -5,7 +5,7 @@ import { renderInvoiceHtml } from '@/lib/invoice-doc';
 import { localeOf } from '@/lib/settings';
 import { t } from '@/lib/i18n';
 import { formatDate } from '@/lib/format';
-import { markInvoicePaidAction, markInvoiceUnpaidAction, deleteInvoiceAction, emailInvoiceAction } from '@/lib/actions';
+import { markInvoicePaidAction, markInvoiceUnpaidAction, deleteInvoiceAction, emailInvoiceAction, sendInvoiceReminderAction } from '@/lib/actions';
 import { DownloadPdfButton } from '@/components/download-pdf-button';
 
 export const dynamic = 'force-dynamic';
@@ -72,6 +72,11 @@ export default async function InvoicePage({ params }: { params: Promise<{ id: st
         <button className="btn-primary" type="submit">
           {t(locale, 'emailInvoice')}
         </button>
+        {inv.status !== 'paid' ? (
+          <button className="btn-amber" type="submit" formAction={sendInvoiceReminderAction}>
+            ⏰ {t(locale, 'sendReminder')}
+          </button>
+        ) : null}
       </form>
 
       {/* Preview */}

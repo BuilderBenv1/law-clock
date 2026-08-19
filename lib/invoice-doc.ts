@@ -75,9 +75,17 @@ export function renderInvoiceHtml(detail: InvoiceDetail, locale: Locale, opts: {
       <tbody>${lineRows || `<tr><td colspan="4" class="muted">—</td></tr>`}</tbody>
     </table>
 
+    ${
+      inv.vatRate > 0
+        ? `<div class="sub-rows">
+            <div class="sub-row"><span>${esc(t(locale, 'subtotal'))}</span><span class="num">${esc(money(inv.subtotal, inv.currency, locale))}</span></div>
+            <div class="sub-row"><span>${esc(t(locale, 'vat'))} ${inv.vatRate}%</span><span class="num">${esc(money(inv.vatAmount, inv.currency, locale))}</span></div>
+          </div>`
+        : ''
+    }
     <div class="total-row">
       <span>${esc(t(locale, 'totalDue'))}</span>
-      <strong>${esc(money(inv.subtotal, inv.currency, locale))}</strong>
+      <strong>${esc(money(inv.total > 0 ? inv.total : inv.subtotal, inv.currency, locale))}</strong>
     </div>
 
     ${inv.notes ? `<div class="notes"><div class="label">${esc(t(locale, 'notes'))}</div>${esc(inv.notes)}</div>` : ''}
@@ -111,7 +119,9 @@ export function renderInvoiceHtml(detail: InvoiceDetail, locale: Locale, opts: {
     table.lines th { color:#6b7688; font-weight:600; font-size:12px; padding:8px; border-bottom:2px solid #e4ebf7; }
     table.lines td { padding:9px 8px; border-bottom:1px solid #eef1f6; }
     .num { text-align:${numAlign}; font-variant-numeric: tabular-nums; }
-    .total-row { display:flex; justify-content:space-between; align-items:center; margin-top:16px; padding-top:14px; border-top:2px solid #eef1f6; font-size:18px; }
+    .sub-rows { margin-top:14px; padding-top:10px; border-top:1px solid #eef1f6; }
+    .sub-row { display:flex; justify-content:space-between; font-size:13.5px; color:#33415c; padding:3px 0; }
+    .total-row { display:flex; justify-content:space-between; align-items:center; margin-top:8px; padding-top:12px; border-top:2px solid #eef1f6; font-size:18px; }
     .total-row strong { font-size:22px; }
     .notes { margin-top:22px; font-size:13px; color:#33415c; }
     .paid-stamp { margin-top:24px; color:#188a4b; font-weight:700; }

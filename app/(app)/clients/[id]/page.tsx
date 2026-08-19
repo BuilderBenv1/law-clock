@@ -4,7 +4,7 @@ import { getClientDetail } from '@/lib/queries';
 import { getSettings, localeOf } from '@/lib/settings';
 import { t } from '@/lib/i18n';
 import { money } from '@/lib/format';
-import { updateClient, archiveClient, createProject } from '@/lib/actions';
+import { updateClient, archiveClient, createProject, enablePortal, disablePortal } from '@/lib/actions';
 
 export const dynamic = 'force-dynamic';
 
@@ -102,6 +102,46 @@ export default async function ClientPage({ params }: { params: Promise<{ id: str
               );
             })}
           </div>
+        )}
+      </section>
+
+      {/* Client portal link */}
+      <section className="card space-y-3">
+        <div>
+          <h2 className="font-semibold">{t(locale, 'portal')}</h2>
+          <p className="text-xs text-slate-500">{t(locale, 'portalHelp')}</p>
+        </div>
+        {client.portalToken ? (
+          <div className="space-y-2">
+            <input
+              className="input text-xs"
+              readOnly
+              dir="ltr"
+              value={`${process.env.APP_BASE_URL || 'https://law-clock.vercel.app'}/portal/${client.portalToken}`}
+              onFocus={undefined}
+            />
+            <div className="flex gap-2">
+              <form action={enablePortal}>
+                <input type="hidden" name="clientId" value={client.id} />
+                <button className="btn-ghost" type="submit" title="regenerate">
+                  ↻ {t(locale, 'enablePortal')}
+                </button>
+              </form>
+              <form action={disablePortal}>
+                <input type="hidden" name="clientId" value={client.id} />
+                <button className="btn-danger" type="submit">
+                  {t(locale, 'disablePortal')}
+                </button>
+              </form>
+            </div>
+          </div>
+        ) : (
+          <form action={enablePortal}>
+            <input type="hidden" name="clientId" value={client.id} />
+            <button className="btn-primary" type="submit">
+              🔗 {t(locale, 'enablePortal')}
+            </button>
+          </form>
         )}
       </section>
 

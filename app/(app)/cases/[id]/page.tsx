@@ -14,6 +14,7 @@ import {
   setProjectStatus,
   archiveProject,
   toggleEntryBillable,
+  updateEntry,
 } from '@/lib/actions';
 
 export const dynamic = 'force-dynamic';
@@ -104,6 +105,39 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
           </div>
         </div>
       )}
+
+      {(project.retainerAmount != null && project.retainerAmount > 0) || (project.retainerHours != null && project.retainerHours > 0) ? (
+        <div className="card">
+          <div className="text-sm font-medium mb-2">{t(locale, 'retainer')}</div>
+          <div className="grid gap-3 md:grid-cols-2">
+            {project.retainerAmount != null && project.retainerAmount > 0 ? (
+              <BudgetBar
+                label={`${money(amount, currency, locale)} / ${money(project.retainerAmount, currency, locale)}`}
+                used={t(locale, 'used')}
+                remaining={`${t(locale, 'remaining')}: ${money(Math.max(0, project.retainerAmount - amount), currency, locale)}`}
+                pct={(amount / project.retainerAmount) * 100}
+              />
+            ) : null}
+            {project.retainerHours != null && project.retainerHours > 0 ? (
+              <BudgetBar
+                label={`${billable.toFixed(2)} / ${project.retainerHours.toFixed(1)} ${t(locale, 'hours')}`}
+                used={t(locale, 'used')}
+                remaining={`${t(locale, 'remaining')}: ${Math.max(0, project.retainerHours - billable).toFixed(2)}`}
+                pct={(billable / project.retainerHours) * 100}
+              />
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {project.hearingDate ? (
+        <div className="card border-sky-800/50 bg-sky-950/10 text-sm flex items-center gap-2">
+          <span>⚖️</span>
+          <span>
+            {t(locale, 'hearingDate')}: <strong>{formatDate(project.hearingDate, s.timezone, locale)}</strong>
+          </span>
+        </div>
+      ) : null}
 
       {/* Report export */}
       <section className="card">
@@ -220,6 +254,39 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
                       {formatHm(r.entry.durationMs ?? 0)}
                     </td>
                     <td className="p-3 text-end whitespace-nowrap">
+                      {r.entry.status === 'stopped' ? (
+                        <details className="inline-block relative">
+                          <summary className="cursor-pointer text-slate-500 hover:text-sky-400 text-xs me-3 list-none" title={t(locale, 'editEntry')}>
+                            ✎
+                          </summary>
+                          <div className="absolute z-10 end-0 mt-1 w-72 card text-start shadow-xl">
+                            <form action={updateEntry} className="space-y-2">
+                              <input type="hidden" name="entryId" value={r.entry.id} />
+                              <div>
+                                <label className="label">{t(locale, 'whatWorkingOn')}</label>
+                                <input name="title" className="input" defaultValue={r.taskName ?? r.entry.description ?? ''} />
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                  <label className="label">{t(locale, 'manualHours')}</label>
+                                  <input name="hours" type="number" step="0.01" min="0.01" className="input" defaultValue={((r.entry.durationMs ?? 0) / 3_600_000).toFixed(2)} required />
+                                </div>
+                                <div>
+                                  <label className="label">{t(locale, 'date')}</label>
+                                  <input name="date" type="date" className="input" defaultValue={new Date(r.entry.startMs).toISOString().slice(0, 10)} />
+                                </div>
+                              </div>
+                              <label className="flex items-center gap-2 text-xs text-slate-300">
+                                <input type="checkbox" name="billable" value="1" defaultChecked={r.entry.billable === 1} className="w-3.5 h-3.5" />
+                                {t(locale, 'billableLabel')}
+                              </label>
+                              <button className="btn-primary w-full" type="submit">
+                                {t(locale, 'save')}
+                              </button>
+                            </form>
+                          </div>
+                        </details>
+                      ) : null}
                       {/* Write the work off, or put it back on the bill. */}
                       <form action={toggleEntryBillable} className="inline">
                         <input type="hidden" name="entryId" value={r.entry.id} />
@@ -283,6 +350,19 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
             <input name="alertThresholdAmount" type="number" step="100" min="0" className="input" defaultValue={project.alertThresholdAmount ?? ''} placeholder={t(locale, 'noAmountAlert')} />
             <div className="text-xs text-slate-500 mt-1">{t(locale, 'amountAlertHelp')}</div>
           </div>
+          <div>
+            <label className="label">{t(locale, 'retainerAmountLabel')} ({currency})</label>
+            <input name="retainerAmount" type="number" step="100" min="0" className="input" defaultValue={project.retainerAmount ?? ''} />
+          </div>
+          <div>
+            <label className="label">{t(locale, 'retainerHoursLabel')}</label>
+            <input name="retainerHours" type="number" step="0.5" min="0" className="input" defaultValue={project.retainerHours ?? ''} />
+            <div className="text-xs text-slate-500 mt-1">{t(locale, 'retainerHelp')}</div>
+          </div>
+          <div>
+            <label className="label">{t(locale, 'hearingDate')}</label>
+            <input name="hearingDate" type="date" className="input" defaultValue={project.hearingDate ? new Date(project.hearingDate).toISOString().slice(0, 10) : ''} />
+          </div>
           <div className="md:col-span-2">
             <button className="btn-primary" type="submit">
               {t(locale, 'save')}
@@ -307,6 +387,27 @@ export default async function CasePage({ params }: { params: Promise<{ id: strin
           </form>
         </div>
       </details>
+    </div>
+  );
+}
+
+function BudgetBar({ label, used, remaining, pct }: { label: string; used: string; remaining: string; pct: number }) {
+  const over = pct >= 100;
+  const warn = pct >= 85;
+  return (
+    <div>
+      <div className="flex items-center justify-between text-sm mb-1">
+        <span className="text-slate-400">
+          {used}: <span className="num text-slate-200">{label}</span>
+        </span>
+        <span className={`text-xs ${over ? 'text-red-400' : warn ? 'text-amber-400' : 'text-slate-500'}`}>{remaining}</span>
+      </div>
+      <div className="h-2 rounded-full bg-slate-800 overflow-hidden">
+        <div
+          className={`h-full ${over ? 'bg-red-500' : warn ? 'bg-amber-500' : 'bg-emerald-500'}`}
+          style={{ width: `${Math.min(100, pct)}%` }}
+        />
+      </div>
     </div>
   );
 }

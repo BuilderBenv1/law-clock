@@ -53,3 +53,15 @@ body {
 [dir='rtl'] .num {
   font-variant-numeric: tabular-nums;
 }
+
+/* Phone ergonomics: timer controls need to be thumb-sized in a hallway. */
+@media (max-width: 640px) {
+  .btn {
+    padding: 0.7rem 1rem;
+    font-size: 0.95rem;
+  }
+  .input {
+    padding: 0.65rem 0.75rem;
+    font-size: 16px; /* prevents iOS zoom-on-focus */
+  }
+}

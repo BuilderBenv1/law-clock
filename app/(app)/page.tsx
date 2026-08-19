@@ -2,12 +2,13 @@ import Link from 'next/link';
 import { TimerWidget, type ActiveProps } from '@/components/timer-widget';
 import { getSettings, localeOf } from '@/lib/settings';
 import { t } from '@/lib/i18n';
-import { getClientsTree, hoursInWindow, activeCasesWithHours, recentEntries } from '@/lib/queries';
+import { getClientsTree, hoursInWindow, activeCasesWithHours, recentEntries, upcomingHearings } from '@/lib/queries';
 import { getActiveSession } from '@/lib/timer-service';
 import { taskSuggestionsByClient } from '@/lib/case-service';
-import { resumeTimer } from '@/lib/actions';
+import { resumeTimer, stopTimer, cancelTimer } from '@/lib/actions';
 import { startOfDayMs, startOfWeekMs, startOfMonthMs, formatHm } from '@/lib/time';
-import { formatDate } from '@/lib/format';
+import { formatDate, money } from '@/lib/format';
+import { listInvoices } from '@/lib/invoice-service';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,7 +17,7 @@ export default async function DashboardPage() {
   const locale = localeOf(s);
   const now = Date.now();
 
-  const [tree, active, suggestions, todayH, weekH, monthH, cases, recent] = await Promise.all([
+  const [tree, active, suggestions, todayH, weekH, monthH, cases, recent, hearings, allInvoices] = await Promise.all([
     getClientsTree(),
     getActiveSession(),
     taskSuggestionsByClient(),
@@ -25,7 +26,22 @@ export default async function DashboardPage() {
     hoursInWindow(startOfMonthMs(now, s.timezone), now + 1),
     activeCasesWithHours(),
     recentEntries(12),
+    upcomingHearings(6),
+    listInvoices(200),
   ]);
+
+  // A live sitting this old is almost always a forgotten timer.
+  const LONG_SITTING_MS = 6 * 3_600_000;
+  const liveForMs =
+    active && active.entry.status === 'running' && active.liveSinceMs != null ? now - active.liveSinceMs : 0;
+  const forgotten = liveForMs > LONG_SITTING_MS;
+
+  const unpaid = allInvoices.filter((i) => i.status !== 'paid');
+  const unpaidByCurrency = new Map<string, number>();
+  for (const i of unpaid) {
+    const due = i.total > 0 ? i.total : i.subtotal;
+    unpaidByCurrency.set(i.currency, (unpaidByCurrency.get(i.currency) ?? 0) + due);
+  }
 
   const activeProps: ActiveProps | null = active
     ? {
@@ -49,7 +65,66 @@ export default async function DashboardPage() {
         </Link>
       </div>
 
+      {forgotten && activeProps ? (
+        <div className="card border-red-800/60 bg-red-950/20 flex items-center justify-between gap-4 flex-wrap">
+          <div className="text-sm">
+            ⏰{' '}
+            {t(locale, 'longTimerWarning').replace('{h}', Math.floor(liveForMs / 3_600_000).toString())}
+            <div className="text-xs text-slate-400 mt-0.5">
+              {activeProps.clientName} · {activeProps.projectName}
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <form action={stopTimer}>
+              <input type="hidden" name="entryId" value={activeProps.entryId} />
+              <button className="btn-primary" type="submit">
+                ■ {t(locale, 'stopAndKeep')}
+              </button>
+            </form>
+            <form action={cancelTimer}>
+              <input type="hidden" name="entryId" value={activeProps.entryId} />
+              <button className="btn-danger" type="submit">
+                {t(locale, 'discardSitting')}
+              </button>
+            </form>
+          </div>
+        </div>
+      ) : null}
+
       <TimerWidget tree={tree} active={activeProps} suggestions={suggestions} serverNowMs={now} locale={locale} />
+
+      {(hearings.length > 0 || unpaid.length > 0) && (
+        <div className="grid gap-4 md:grid-cols-2">
+          {hearings.length > 0 ? (
+            <div className="card">
+              <h2 className="font-semibold mb-2 text-sm">⚖️ {t(locale, 'upcomingHearings')}</h2>
+              <ul className="space-y-1.5 text-sm">
+                {hearings.map((h) => (
+                  <li key={h.projectId} className="flex items-center justify-between gap-2">
+                    <Link href={`/cases/${h.projectId}`} className="truncate hover:text-sky-300">
+                      <span className="text-slate-400">{h.clientName} · </span>
+                      {h.caseNumber ? <span className="text-slate-500">{h.caseNumber} · </span> : null}
+                      {h.projectName}
+                    </Link>
+                    <span className="num text-slate-300 shrink-0">{formatDate(h.hearingDate, s.timezone, locale)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {unpaid.length > 0 ? (
+            <Link href="/invoices" className="card block hover:border-amber-700/60 transition">
+              <h2 className="font-semibold mb-1 text-sm text-amber-300">💰 {t(locale, 'outstanding')}</h2>
+              <div className="num text-2xl font-bold">
+                {[...unpaidByCurrency.entries()].map(([cur, sum]) => money(sum, cur, locale)).join(' + ')}
+              </div>
+              <div className="text-xs text-slate-500 mt-0.5">
+                {unpaid.length} {t(locale, 'invoices')}
+              </div>
+            </Link>
+          ) : null}
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-4">
         <Stat label={t(locale, 'today')} value={todayH} />

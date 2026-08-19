@@ -452,6 +452,35 @@ export async function buildReport(opts: {
   };
 }
 
+export interface UpcomingHearing {
+  projectId: string;
+  projectName: string;
+  caseNumber: string | null;
+  clientName: string;
+  hearingDate: Date;
+}
+
+/** Open cases with a hearing scheduled from today onward, soonest first. */
+export async function upcomingHearings(limit = 8): Promise<UpcomingHearing[]> {
+  const db = getDb();
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const rows = await db
+    .select({
+      projectId: projects.id,
+      projectName: projects.name,
+      caseNumber: projects.caseNumber,
+      clientName: clients.name,
+      hearingDate: projects.hearingDate,
+    })
+    .from(projects)
+    .innerJoin(clients, eq(clients.id, projects.clientId))
+    .where(and(eq(projects.archived, 0), eq(projects.status, 'open'), gte(projects.hearingDate, today)))
+    .orderBy(projects.hearingDate)
+    .limit(limit);
+  return rows.filter((r): r is UpcomingHearing => r.hearingDate != null);
+}
+
 /** Total charged value of a case to date — drives the money-spent alert. */
 export async function caseBilledAmount(projectId: string): Promise<number> {
   const db = getDb();

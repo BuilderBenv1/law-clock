@@ -205,6 +205,13 @@ export function renderStatementHtml(
         )}</p>`
       : '';
 
+  const vatNote =
+    s.vatRate > 0
+      ? `<p class="note">${esc(
+          locale === 'he' ? `הסכומים אינם כוללים מע״מ (${s.vatRate}%).` : `Amounts exclude VAT (${s.vatRate}%).`,
+        )}</p>`
+      : '';
+
   const unbilledNote =
     report.unbilledHours > 0
       ? `<p class="note credit">${esc(
@@ -241,7 +248,7 @@ export function renderStatementHtml(
     </section>
 
     ${summary}
-    ${roundingNote}${unbilledNote}
+    ${roundingNote}${vatNote}${unbilledNote}
     ${caseSection}
     ${taskSection}
     ${detailSection}

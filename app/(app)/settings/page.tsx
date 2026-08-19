@@ -1,7 +1,9 @@
 import { getSettings, localeOf } from '@/lib/settings';
 import { t } from '@/lib/i18n';
-import { updateSettings, sendMonthlyNow } from '@/lib/actions';
+import { updateSettings, sendMonthlyNow, addAppUser, removeAppUser } from '@/lib/actions';
 import { prevMonthKey } from '@/lib/time';
+import { getDb } from '@/lib/db';
+import { appUsers } from '@/lib/db/schema';
 import { LogoUpload } from '@/components/logo-upload';
 
 export const dynamic = 'force-dynamic';
@@ -10,6 +12,7 @@ export default async function SettingsPage() {
   const s = await getSettings();
   const locale = localeOf(s);
   const defaultMonth = prevMonthKey(new Date(), s.timezone);
+  const users = await getDb().select().from(appUsers).orderBy(appUsers.createdAt);
 
   return (
     <div className="space-y-8 max-w-2xl">
@@ -60,6 +63,10 @@ export default async function SettingsPage() {
           <input name="roundIncrementMin" type="number" step="1" min="1" className="input" defaultValue={s.roundIncrementMin} />
         </div>
         <div>
+          <label className="label">{t(locale, 'vatRateLabel')}</label>
+          <input name="vatRate" type="number" step="0.1" min="0" className="input" defaultValue={s.vatRate} />
+        </div>
+        <div>
           <label className="label">{t(locale, 'timezone')}</label>
           <input name="timezone" className="input" defaultValue={s.timezone} />
         </div>
@@ -99,6 +106,45 @@ export default async function SettingsPage() {
             : 'Sent to the configured report email, with a CSV attached.'}
         </p>
       </form>
+
+      {/* Who can sign in — beyond OWNER_EMAIL, managed here without redeploying. */}
+      <section className="card space-y-4">
+        <div>
+          <h2 className="font-semibold">{t(locale, 'users')}</h2>
+          <p className="text-xs text-slate-500">{t(locale, 'usersHelp')}</p>
+        </div>
+        {users.length > 0 ? (
+          <ul className="space-y-2">
+            {users.map((u) => (
+              <li key={u.id} className="flex items-center justify-between text-sm border-b border-slate-800 pb-2">
+                <span>
+                  {u.name ? <span className="font-medium">{u.name} · </span> : null}
+                  <span className="text-slate-400">{u.email}</span>
+                </span>
+                <form action={removeAppUser}>
+                  <input type="hidden" name="id" value={u.id} />
+                  <button type="submit" className="text-slate-500 hover:text-red-400 text-xs" title={t(locale, 'delete')}>
+                    ✕
+                  </button>
+                </form>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <form action={addAppUser} className="flex items-end gap-2 flex-wrap">
+          <div className="flex-1 min-w-[200px]">
+            <label className="label">{t(locale, 'email')}</label>
+            <input name="email" type="email" className="input" placeholder="colleague@gmail.com" required />
+          </div>
+          <div className="flex-1 min-w-[140px]">
+            <label className="label">{t(locale, 'name')}</label>
+            <input name="name" className="input" />
+          </div>
+          <button className="btn-primary" type="submit">
+            ＋ {t(locale, 'addUser')}
+          </button>
+        </form>
+      </section>
     </div>
   );
 }

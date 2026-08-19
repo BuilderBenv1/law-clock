@@ -10,6 +10,17 @@ export default async function InvoicesPage() {
   const s = await getSettings();
   const locale = localeOf(s);
   const invoices = await listInvoices();
+  const now = Date.now();
+
+  const dueOf = (inv: (typeof invoices)[number]) => (inv.total > 0 ? inv.total : inv.subtotal);
+  const daysOpen = (inv: (typeof invoices)[number]) =>
+    Math.floor((now - new Date(inv.issuedAt).getTime()) / 86_400_000);
+
+  // The cash-flow picture: what's unpaid, how much, and how stale.
+  const unpaid = invoices.filter((i) => i.status !== 'paid');
+  const unpaidByCurrency = new Map<string, number>();
+  for (const i of unpaid) unpaidByCurrency.set(i.currency, (unpaidByCurrency.get(i.currency) ?? 0) + dueOf(i));
+  const oldestDays = unpaid.length > 0 ? Math.max(...unpaid.map(daysOpen)) : 0;
 
   return (
     <div className="space-y-6">
@@ -19,6 +30,21 @@ export default async function InvoicesPage() {
           ＋ {t(locale, 'newInvoice')}
         </Link>
       </div>
+
+      {unpaid.length > 0 && (
+        <div className="card border-amber-800/50 bg-amber-950/10 flex items-center gap-6 flex-wrap">
+          <div>
+            <div className="text-xs uppercase tracking-wide text-amber-400">{t(locale, 'outstanding')}</div>
+            <div className="num text-2xl font-bold mt-0.5">
+              {[...unpaidByCurrency.entries()].map(([cur, sum]) => money(sum, cur, locale)).join(' + ')}
+            </div>
+          </div>
+          <div className="text-sm text-slate-400">
+            {unpaid.length} {t(locale, 'invoices')} · {locale === 'he' ? 'הוותיקה ביותר' : 'oldest'} {oldestDays}{' '}
+            {t(locale, 'daysOpen')}
+          </div>
+        </div>
+      )}
 
       {invoices.length === 0 ? (
         <p className="text-slate-500">{t(locale, 'noInvoices')}</p>
@@ -45,11 +71,16 @@ export default async function InvoicesPage() {
                   </td>
                   <td className="p-3">{inv.clientName}</td>
                   <td className="p-3 text-slate-400">{formatDate(inv.issuedAt, s.timezone, locale)}</td>
-                  <td className="p-3 text-end num">{money(inv.subtotal, inv.currency, locale)}</td>
+                  <td className="p-3 text-end num">{money(inv.total > 0 ? inv.total : inv.subtotal, inv.currency, locale)}</td>
                   <td className="p-3 text-end">
                     <span className={`pill ${inv.status === 'paid' ? 'bg-emerald-950 text-emerald-300' : 'bg-amber-950 text-amber-300'}`}>
                       {t(locale, inv.status === 'paid' ? 'paid' : 'unpaid')}
                     </span>
+                    {inv.status !== 'paid' ? (
+                      <div className={`text-xs mt-1 ${daysOpen(inv) > 30 ? 'text-red-400' : 'text-slate-500'}`}>
+                        {daysOpen(inv)} {t(locale, 'daysOpen')}
+                      </div>
+                    ) : null}
                   </td>
                 </tr>
               ))}
