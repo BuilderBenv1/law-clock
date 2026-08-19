@@ -84,11 +84,18 @@ export function renderInvoiceHtml(detail: InvoiceDetail, locale: Locale, opts: {
     ${paid && inv.paidAt ? `<div class="paid-stamp">${esc(t(locale, 'paid'))} · ${esc(formatDate(inv.paidAt, s.timezone, locale))}</div>` : ''}
   </div>`;
 
-  const css = `
+  // Kept separate from the document rules: this markup is also embedded in the
+  // dark app shell, where a `body` rule would repaint the whole screen.
+  const pageCss = `
     :root { color-scheme: light; }
-    * { box-sizing: border-box; }
-    body { font-family: 'Segoe UI', Arial, 'Helvetica Neue', sans-serif; color:#1a2233; margin:0; background:#f4f6fb; }
-    .doc { max-width: 820px; margin: 24px auto; background:#fff; padding: 36px; border-radius: 12px; }
+    body { margin:0; background:#f4f6fb; }
+    @media print { body { background:#fff; } }
+  `;
+
+  const css = `
+    .doc, .doc * { box-sizing: border-box; }
+    .doc { max-width: 820px; margin: 24px auto; background:#fff; padding: 36px; border-radius: 12px;
+           font-family: 'Segoe UI', Arial, 'Helvetica Neue', sans-serif; color:#1a2233; }
     .head { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; border-bottom:2px solid #eef1f6; padding-bottom:16px; }
     .firm-name { font-size:20px; font-weight:700; }
     .title { font-size:26px; font-weight:800; letter-spacing:0.5px; }
@@ -108,7 +115,7 @@ export function renderInvoiceHtml(detail: InvoiceDetail, locale: Locale, opts: {
     .total-row strong { font-size:22px; }
     .notes { margin-top:22px; font-size:13px; color:#33415c; }
     .paid-stamp { margin-top:24px; color:#188a4b; font-weight:700; }
-    @media print { body { background:#fff; } .doc { box-shadow:none; margin:0; max-width:none; border-radius:0; } .noprint { display:none; } }
+    @media print { .doc { box-shadow:none; margin:0; max-width:none; border-radius:0; } .noprint { display:none; } }
   `;
 
   if (!opts.standalone) return `<style>${css}</style>${body}`;
@@ -116,7 +123,7 @@ export function renderInvoiceHtml(detail: InvoiceDetail, locale: Locale, opts: {
   return `<!doctype html><html lang="${locale}" dir="${dirAttr}"><head>
     <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     <title>${esc(t(locale, 'invoice'))} ${esc(inv.number)}</title>
-    <style>${css}
+    <style>${pageCss}${css}
       .bar { max-width:820px; margin:14px auto 0; display:flex; gap:8px; justify-content:flex-end; }
       .btn { font:inherit; background:#2563eb; color:#fff; border:0; border-radius:8px; padding:8px 16px; cursor:pointer; }
     </style></head><body>

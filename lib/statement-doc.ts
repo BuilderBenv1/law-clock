@@ -252,11 +252,19 @@ export function renderStatementHtml(
     </footer>
   </div>`;
 
-  const css = `
+  // Page-level rules live apart from the document's own rules: this markup is
+  // also embedded inside the dark app shell, where a stray `body` rule would
+  // repaint the whole screen. Only the standalone page emits these.
+  const pageCss = `
     :root { color-scheme: light; }
-    * { box-sizing: border-box; }
-    body { font-family: 'Segoe UI', Arial, 'Helvetica Neue', sans-serif; color:#16202f; margin:0; background:#eef1f6; }
-    .doc { max-width: 860px; margin: 24px auto; background:#fff; padding: 40px 44px; border-radius: 10px; }
+    body { margin:0; background:#eef1f6; }
+    @media print { body { background:#fff; } }
+  `;
+
+  const css = `
+    .doc, .doc * { box-sizing: border-box; }
+    .doc { max-width: 860px; margin: 24px auto; background:#fff; padding: 40px 44px; border-radius: 10px;
+           font-family: 'Segoe UI', Arial, 'Helvetica Neue', sans-serif; color:#16202f; }
     .head { display:flex; justify-content:space-between; align-items:flex-start; gap:20px;
             border-bottom:3px double #c8d2e4; padding-bottom:18px; }
     .logo { max-height:62px; max-width:220px; object-fit:contain; }
@@ -305,10 +313,9 @@ export function renderStatementHtml(
     .foot { margin-top:32px; padding-top:14px; border-top:1px solid #dde5f1; font-size:12px; }
 
     @media print {
-      body { background:#fff; }
       .doc { margin:0; max-width:none; border-radius:0; padding:0; }
       .noprint { display:none; }
-      thead { display:table-header-group; }
+      .doc thead { display:table-header-group; }
     }
   `;
 
@@ -317,7 +324,7 @@ export function renderStatementHtml(
   return `<!doctype html><html lang="${locale}" dir="${dirAttr}"><head>
     <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     <title>${esc(t(locale, 'statement'))} — ${esc(report.client.name)}</title>
-    <style>${css}
+    <style>${pageCss}${css}
       .bar { max-width:860px; margin:14px auto 0; display:flex; gap:8px; justify-content:flex-end; }
       .btn { font:inherit; background:#1e3a63; color:#fff; border:0; border-radius:8px; padding:9px 18px; cursor:pointer; }
       .btn.ghost { background:#dde5f1; color:#1e3a63; }

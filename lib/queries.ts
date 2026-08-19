@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, isNull, isNotNull, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, gte, isNull, isNotNull, lt, sql } from 'drizzle-orm';
 import { getDb } from './db';
 import {
   clients,
@@ -314,7 +314,9 @@ export async function buildReport(opts: {
     project = p ?? null;
   }
 
-  const where = [eq(timeEntries.clientId, opts.clientId), isNotNull(timeEntries.durationMs)];
+  // gt(0) rather than isNotNull: a session that has only just started carries a
+  // zero duration and would otherwise show as a 0.00 line on a client statement.
+  const where = [eq(timeEntries.clientId, opts.clientId), gt(timeEntries.durationMs, 0)];
   if (!opts.allTime) {
     where.push(gte(timeEntries.startMs, opts.fromMs), lt(timeEntries.startMs, opts.toMs));
   }
