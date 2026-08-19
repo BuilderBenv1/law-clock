@@ -1,4 +1,4 @@
-import { Resend } from 'resend';
+import { sendMail } from './mailer';
 import type { Client, Project, Settings } from './db/schema';
 import type { ReportData } from './queries';
 import type { Locale } from './i18n';
@@ -7,14 +7,6 @@ import { money, formatDate } from './format';
 import type { InvoiceDetail } from './invoice-service';
 import { renderInvoiceHtml } from './invoice-doc';
 
-function resend(): Resend {
-  const key = process.env.RESEND_API_KEY;
-  if (!key) throw new Error('RESEND_API_KEY is not set');
-  return new Resend(key);
-}
-function fromAddress(): string {
-  return process.env.EMAIL_FROM || 'onboarding@resend.dev';
-}
 function esc(s: string): string {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c);
 }
@@ -56,8 +48,7 @@ export async function sendThresholdAlert(
     <p>Please don't hesitate to reach out with any questions.</p>
     <p style="margin-top:20px">Best regards,<br>${esc(s.firmName)}</p>`;
 
-  const { error } = await resend().emails.send({
-    from: fromAddress(),
+  await sendMail({
     to,
     subject:
       locale === 'he'
@@ -65,7 +56,6 @@ export async function sendThresholdAlert(
         : `Case hours update — ${project.name} (${hours.toFixed(1)}h)`,
     html: shell(locale, locale === 'he' ? heBody : enBody),
   });
-  if (error) throw new Error(`Resend send failed: ${error.message ?? 'unknown error'}`);
   return to;
 }
 
@@ -103,13 +93,11 @@ export async function sendAmountAlert(
     <p>We're happy to answer any questions, or send a detailed statement on request.</p>
     <p style="margin-top:20px">Best regards,<br>${esc(s.firmName)}</p>`;
 
-  const { error } = await resend().emails.send({
-    from: fromAddress(),
+  await sendMail({
     to,
     subject: locale === 'he' ? `תזכורת חיוב — ${project.name} (${amountStr})` : `Billing reminder — ${project.name} (${amountStr})`,
     html: shell(locale, locale === 'he' ? heBody : enBody),
   });
-  if (error) throw new Error(`Resend send failed: ${error.message ?? 'unknown error'}`);
   return to;
 }
 
@@ -129,8 +117,7 @@ export async function sendPaymentReminder(detail: InvoiceDetail, to: string, loc
       : `<p>Hello ${esc(inv.clientName || '')},</p>
          <p>A friendly reminder: invoice <strong>${esc(inv.number)}</strong> issued ${esc(issued)} for <strong>${esc(due)}</strong> is still outstanding.</p>
          <p>The invoice is below. If payment has already been made, please disregard this note — and thank you.</p>`;
-  const { error } = await resend().emails.send({
-    from: fromAddress(),
+  await sendMail({
     to,
     subject:
       locale === 'he'
@@ -138,7 +125,6 @@ export async function sendPaymentReminder(detail: InvoiceDetail, to: string, loc
         : `Payment reminder — invoice ${inv.number} (${due})`,
     html: `${intro}${renderInvoiceHtml(detail, locale)}`,
   });
-  if (error) throw new Error(`Resend send failed: ${error.message ?? 'unknown error'}`);
 }
 
 /** Email an invoice to a recipient — the printable invoice doc is the body. */
@@ -148,13 +134,11 @@ export async function sendInvoiceEmail(detail: InvoiceDetail, to: string, locale
     locale === 'he'
       ? `<p dir="rtl">שלום ${esc(inv.clientName || '')},</p><p dir="rtl">מצורפת חשבונית ${esc(inv.number)} מ${esc(inv.firmName)}.</p>`
       : `<p>Hello ${esc(inv.clientName || '')},</p><p>Please find invoice ${esc(inv.number)} from ${esc(inv.firmName)} below.</p>`;
-  const { error } = await resend().emails.send({
-    from: fromAddress(),
+  await sendMail({
     to,
     subject: locale === 'he' ? `חשבונית ${inv.number} — ${inv.firmName}` : `Invoice ${inv.number} from ${inv.firmName}`,
     html: `${intro}${renderInvoiceHtml(detail, locale)}`,
   });
-  if (error) throw new Error(`Resend send failed: ${error.message ?? 'unknown error'}`);
 }
 
 export interface MonthlyClientReport {
@@ -256,12 +240,10 @@ export async function sendMonthlyReport(
     <p style="color:#6b7688;font-size:13px;margin-top:16px">A detailed CSV file is attached.</p>`;
 
   const csv = monthlyCombinedCsv(reports, s, locale);
-  const { error } = await resend().emails.send({
-    from: fromAddress(),
+  await sendMail({
     to,
     subject: locale === 'he' ? `דוח שעות חודשי — ${label}` : `Monthly hours report — ${label}`,
     html: shell(locale, locale === 'he' ? heInner : enInner),
     attachments: [{ filename: `report-${monthKeyStr}.csv`, content: Buffer.from(csv, 'utf-8') }],
   });
-  if (error) throw new Error(`Resend send failed: ${error.message ?? 'unknown error'}`);
 }
