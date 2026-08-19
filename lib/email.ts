@@ -113,6 +113,34 @@ export async function sendAmountAlert(
   return to;
 }
 
+/**
+ * A polite unpaid-invoice nudge. Includes the number, issue date, and amount
+ * due, with the full invoice document below so the client need not dig for it.
+ */
+export async function sendPaymentReminder(detail: InvoiceDetail, to: string, locale: Locale): Promise<void> {
+  const inv = detail.invoice;
+  const due = money(inv.total > 0 ? inv.total : inv.subtotal, inv.currency, locale);
+  const issued = formatDate(inv.issuedAt, detail.settings.timezone, locale);
+  const intro =
+    locale === 'he'
+      ? `<p dir="rtl">שלום ${esc(inv.clientName || '')},</p>
+         <p dir="rtl">תזכורת ידידותית: חשבונית <strong>${esc(inv.number)}</strong> מיום ${esc(issued)} על סך <strong>${esc(due)}</strong> טרם שולמה.</p>
+         <p dir="rtl">החשבונית מצורפת להלן. אם התשלום כבר בוצע — נא להתעלם מהודעה זו, ותודה.</p>`
+      : `<p>Hello ${esc(inv.clientName || '')},</p>
+         <p>A friendly reminder: invoice <strong>${esc(inv.number)}</strong> issued ${esc(issued)} for <strong>${esc(due)}</strong> is still outstanding.</p>
+         <p>The invoice is below. If payment has already been made, please disregard this note — and thank you.</p>`;
+  const { error } = await resend().emails.send({
+    from: fromAddress(),
+    to,
+    subject:
+      locale === 'he'
+        ? `תזכורת תשלום — חשבונית ${inv.number} (${due})`
+        : `Payment reminder — invoice ${inv.number} (${due})`,
+    html: `${intro}${renderInvoiceHtml(detail, locale)}`,
+  });
+  if (error) throw new Error(`Resend send failed: ${error.message ?? 'unknown error'}`);
+}
+
 /** Email an invoice to a recipient — the printable invoice doc is the body. */
 export async function sendInvoiceEmail(detail: InvoiceDetail, to: string, locale: Locale): Promise<void> {
   const inv = detail.invoice;

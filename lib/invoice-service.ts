@@ -36,6 +36,10 @@ export async function insertInvoice(
   const number = await nextInvoiceNumber(tx);
   const s = args.settings;
   const p = args.project ?? null;
+  // VAT is snapshotted at issue time so a later rate change never rewrites an
+  // already-issued document.
+  const vatRate = s.vatRate > 0 ? s.vatRate : 0;
+  const vatAmount = round2((args.subtotal * vatRate) / 100);
   await tx.insert(invoices).values({
     id,
     number,
@@ -44,6 +48,9 @@ export async function insertInvoice(
     status: 'unpaid',
     currency: args.client.currency,
     subtotal: args.subtotal,
+    vatRate,
+    vatAmount,
+    total: round2(args.subtotal + vatAmount),
     notes: args.notes ?? null,
     firmName: s.firmName,
     firmEmail: s.firmEmail,

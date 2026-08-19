@@ -4,7 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { and, eq, isNull } from 'drizzle-orm';
 import { getDb } from './db';
-import { clients, projects, tasks, timeEntries, entrySegments, settings, invoices } from './db/schema';
+import { clients, projects, tasks, timeEntries, entrySegments, settings, invoices, appUsers } from './db/schema';
 import { getSettings, localeOf } from './settings';
 import { newId, round2 } from './util';
 import { checkThreshold } from './alerts';
@@ -25,10 +25,13 @@ import {
   resumeSession,
   stopSession,
   stopAllActive,
+  discardLiveSitting,
   findOrCreateTask,
   setEntryBillable,
 } from './timer-service';
 import { createClientWithDefaultCase, ensureDefaultCase } from './case-service';
+import { auth } from './auth';
+import { sendPaymentReminder } from './email';
 
 function str(fd: FormData, key: string): string {
   return String(fd.get(key) ?? '').trim();
@@ -72,7 +75,13 @@ export async function startTimer(fd: FormData): Promise<void> {
   if (!projectId) projectId = (await ensureDefaultCase(clientId, localeOf(s))).id;
 
   const title = str(fd, 'title') || str(fd, 'description');
-  const { stoppedProjects } = await startSession({ clientId, projectId, title });
+  const session = await auth();
+  const { stoppedProjects } = await startSession({
+    clientId,
+    projectId,
+    title,
+    userEmail: session?.user?.email ?? null,
+  });
   for (const p of stoppedProjects) await checkThreshold(p);
   revalidateTracking(clientId, projectId);
 }
@@ -100,11 +109,15 @@ export async function stopTimer(fd: FormData): Promise<void> {
   revalidateTracking(str(fd, 'clientId'), projectId ?? undefined);
 }
 
-/** Discard the live session without recording any time. */
+/**
+ * Discard the live sitting. On a fresh session that removes the entry; on a
+ * resumed one it only drops the open sitting, keeping the earlier work — so an
+ * overnight forgotten timer never destroys yesterday's hours.
+ */
 export async function cancelTimer(fd: FormData): Promise<void> {
   const entryId = str(fd, 'entryId');
-  const db = getDb();
-  await db.delete(timeEntries).where(and(eq(timeEntries.id, entryId), isNull(timeEntries.endMs)));
+  if (!entryId) throw new Error('Missing entry id');
+  await discardLiveSitting(entryId);
   revalidateTracking();
 }
 
@@ -133,6 +146,7 @@ export async function addManualEntry(fd: FormData): Promise<void> {
   const durationMs = Math.round(hours * 3_600_000);
   const billable = str(fd, 'billable') === '0' ? 0 : 1;
 
+  const session = await auth();
   const db = getDb();
   const id = newId();
   await db.insert(timeEntries).values({
@@ -146,11 +160,51 @@ export async function addManualEntry(fd: FormData): Promise<void> {
     durationMs,
     status: 'stopped',
     billable,
+    userEmail: session?.user?.email ?? null,
   });
   // A manual entry is one uninterrupted sitting.
   await db.insert(entrySegments).values({ entryId: id, startMs, endMs: startMs + durationMs });
   await checkThreshold(projectId);
   revalidateTracking(clientId, projectId);
+}
+
+/**
+ * Correct a logged session: title, hours, date, billable. The duration becomes
+ * authoritative, so the segments are rewritten as one sitting of that length —
+ * pause detail is deliberately traded away for a clean correction.
+ */
+export async function updateEntry(fd: FormData): Promise<void> {
+  const entryId = str(fd, 'entryId');
+  if (!entryId) throw new Error('Missing entry id');
+  const db = getDb();
+  const [entry] = await db.select().from(timeEntries).where(eq(timeEntries.id, entryId));
+  if (!entry) throw new Error('Entry not found');
+  if (entry.status !== 'stopped') throw new Error('עצור את הטיימר לפני עריכה / Stop the timer before editing');
+
+  const hours = num(fd, 'hours');
+  if (!(hours > 0)) throw new Error('שעות חייבות להיות גדולות מאפס / Hours must be greater than zero');
+  const durationMs = Math.round(hours * 3_600_000);
+  const dateStr = str(fd, 'date');
+  const startMs = dateStr ? dateToMs(dateStr) : entry.startMs;
+  const title = str(fd, 'title');
+  const taskId = title ? await findOrCreateTask(entry.projectId, title) : entry.taskId;
+  const billable = str(fd, 'billable') === '1' ? 1 : 0;
+
+  await db.delete(entrySegments).where(eq(entrySegments.entryId, entryId));
+  await db.insert(entrySegments).values({ entryId, startMs, endMs: startMs + durationMs });
+  await db
+    .update(timeEntries)
+    .set({
+      startMs,
+      endMs: startMs + durationMs,
+      durationMs,
+      taskId,
+      description: title || entry.description,
+      billable,
+    })
+    .where(eq(timeEntries.id, entryId));
+  await checkThreshold(entry.projectId);
+  revalidateTracking(entry.clientId, entry.projectId);
 }
 
 export async function deleteEntry(fd: FormData): Promise<void> {
@@ -278,6 +332,9 @@ export async function createProject(fd: FormData): Promise<void> {
     hourlyRate: numOrNull(fd, 'hourlyRate'),
     alertThresholdHours: numOrNull(fd, 'alertThresholdHours'),
     alertThresholdAmount: numOrNull(fd, 'alertThresholdAmount'),
+    retainerAmount: numOrNull(fd, 'retainerAmount'),
+    retainerHours: numOrNull(fd, 'retainerHours'),
+    hearingDate: str(fd, 'hearingDate') ? new Date(`${str(fd, 'hearingDate')}T12:00:00Z`) : null,
   });
   revalidatePath('/');
   revalidatePath('/clients/' + clientId);
@@ -305,6 +362,9 @@ export async function updateProject(fd: FormData): Promise<void> {
       hourlyRate: numOrNull(fd, 'hourlyRate'),
       alertThresholdHours: newThreshold,
       alertThresholdAmount: newAmount,
+      retainerAmount: numOrNull(fd, 'retainerAmount'),
+      retainerHours: numOrNull(fd, 'retainerHours'),
+      hearingDate: str(fd, 'hearingDate') ? new Date(`${str(fd, 'hearingDate')}T12:00:00Z`) : null,
       ...(rearmHours ? { alertNotifiedHours: null, alertNotifiedAt: null } : {}),
       ...(rearmAmount ? { alertNotifiedAmount: null, alertAmountNotifiedAt: null } : {}),
     })
@@ -375,6 +435,7 @@ export async function updateSettings(fd: FormData): Promise<void> {
       timezone: str(fd, 'timezone') || 'Asia/Jerusalem',
       locale: str(fd, 'locale') === 'en' ? 'en' : 'he',
       autoSendMonthly: str(fd, 'autoSendMonthly') === '1' ? 1 : 0,
+      vatRate: num(fd, 'vatRate', 18),
     })
     .where(eq(settings.id, 1));
   revalidatePath('/');
@@ -495,5 +556,59 @@ export async function emailInvoiceAction(fd: FormData): Promise<void> {
   if (!recipient) throw new Error('אין כתובת דוא״ל / No recipient email — enter an address');
   await sendInvoiceEmail(detail, recipient, localeOf(detail.settings));
   await getDb().update(invoices).set({ emailedAt: new Date(), emailedTo: recipient }).where(eq(invoices.id, id));
+  revalidatePath('/invoices/' + id);
+}
+
+// ------------------------- Client portal -------------------------
+
+/** Turn the client's read-only portal link on (minting a fresh secret). */
+export async function enablePortal(fd: FormData): Promise<void> {
+  const clientId = str(fd, 'clientId');
+  if (!clientId) throw new Error('Missing client id');
+  const token = newId() + newId(); // 40 chars of secret
+  await getDb().update(clients).set({ portalToken: token }).where(eq(clients.id, clientId));
+  revalidatePath('/clients/' + clientId);
+}
+
+/** Kill the link. Anyone holding the old URL loses access immediately. */
+export async function disablePortal(fd: FormData): Promise<void> {
+  const clientId = str(fd, 'clientId');
+  if (!clientId) throw new Error('Missing client id');
+  await getDb().update(clients).set({ portalToken: null }).where(eq(clients.id, clientId));
+  revalidatePath('/clients/' + clientId);
+}
+
+// ------------------------- Users -------------------------
+
+export async function addAppUser(fd: FormData): Promise<void> {
+  const email = str(fd, 'email').toLowerCase();
+  if (!email || !email.includes('@')) throw new Error('כתובת דוא״ל לא תקינה / Invalid email address');
+  const db = getDb();
+  const existing = await db.select({ id: appUsers.id }).from(appUsers).where(eq(appUsers.email, email)).limit(1);
+  if (existing.length === 0) {
+    await db.insert(appUsers).values({ id: newId(), email, name: str(fd, 'name') || null });
+  }
+  revalidatePath('/settings');
+}
+
+export async function removeAppUser(fd: FormData): Promise<void> {
+  const id = str(fd, 'id');
+  if (!id) throw new Error('Missing user id');
+  await getDb().delete(appUsers).where(eq(appUsers.id, id));
+  revalidatePath('/settings');
+}
+
+// ------------------------- Payment reminders -------------------------
+
+/** Email the client a polite nudge about an unpaid invoice. */
+export async function sendInvoiceReminderAction(fd: FormData): Promise<void> {
+  const id = str(fd, 'invoiceId');
+  if (!id) throw new Error('Missing invoice id');
+  const detail = await getInvoiceDetail(id);
+  if (!detail) throw new Error('Invoice not found');
+  const to = str(fd, 'to') || detail.invoice.clientEmail;
+  if (!to) throw new Error('אין כתובת דוא״ל / No recipient email — enter an address');
+  await sendPaymentReminder(detail, to, localeOf(detail.settings));
+  await getDb().update(invoices).set({ emailedAt: new Date(), emailedTo: to }).where(eq(invoices.id, id));
   revalidatePath('/invoices/' + id);
 }

@@ -29,10 +29,15 @@ export const clients = pgTable(
     hourlyRate: doublePrecision('hourly_rate').notNull().default(0),
     currency: text('currency').notNull().default('ILS'),
     notes: text('notes'),
+    /** Secret for the client's read-only portal link; null = portal disabled. */
+    portalToken: text('portal_token'),
     archived: integer('archived').notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => ({ nameIdx: index('client_name_idx').on(t.name) }),
+  (t) => ({
+    nameIdx: index('client_name_idx').on(t.name),
+    portalIdx: uniqueIndex('client_portal_token_idx').on(t.portalToken),
+  }),
 );
 
 /**
@@ -66,6 +71,12 @@ export const projects = pgTable(
     /** The amount threshold already alerted on (dedupe guard). */
     alertNotifiedAmount: doublePrecision('alert_notified_amount'),
     alertAmountNotifiedAt: timestamp('alert_amount_notified_at', { withTimezone: true }),
+    /** Prepaid budget for the case, in the client's currency; null = none. */
+    retainerAmount: doublePrecision('retainer_amount'),
+    /** Prepaid hours for the case; null = none. Either or both may be set. */
+    retainerHours: doublePrecision('retainer_hours'),
+    /** Next court hearing on this case; null = none scheduled. */
+    hearingDate: timestamp('hearing_date', { withTimezone: true }),
     /**
      * The client's catch-all case, auto-created with the client. Work can be
      * tracked without choosing a case, and lands here.
@@ -122,6 +133,8 @@ export const timeEntries = pgTable(
     status: text('status').notNull().default('stopped'),
     /** 0 = logged but not charged (pro bono, write-off, internal). */
     billable: integer('billable').notNull().default(1),
+    /** Email of the signed-in user who logged this; null on legacy rows. */
+    userEmail: text('user_email'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => ({
@@ -175,6 +188,20 @@ export const settings = pgTable('settings', {
   lastMonthlySentKey: text('last_monthly_sent_key'),
   /** Running invoice number sequence. */
   invoiceSeq: integer('invoice_seq').notNull().default(0),
+  /** VAT percentage added on invoices (Israeli standard rate: 18). 0 = none. */
+  vatRate: doublePrecision('vat_rate').notNull().default(18),
+});
+
+/**
+ * Additional people allowed to sign in, managed from Settings. Checked at
+ * login alongside the OWNER_EMAIL env allowlist, so the owner can add a
+ * colleague without redeploying.
+ */
+export const appUsers = pgTable('app_users', {
+  id: text('id').primaryKey(),
+  email: text('email').notNull(),
+  name: text('name'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
 /**
@@ -193,7 +220,13 @@ export const invoices = pgTable(
     projectId: text('project_id').references(() => projects.id, { onDelete: 'set null' }),
     status: text('status').notNull().default('unpaid'), // 'unpaid' | 'paid'
     currency: text('currency').notNull(),
+    /** Sum of the lines, before VAT. */
     subtotal: doublePrecision('subtotal').notNull(),
+    /** VAT percentage applied at issue time (snapshot; 0 on legacy rows). */
+    vatRate: doublePrecision('vat_rate').notNull().default(0),
+    vatAmount: doublePrecision('vat_amount').notNull().default(0),
+    /** subtotal + vatAmount — the figure the client owes. */
+    total: doublePrecision('total').notNull().default(0),
     notes: text('notes'),
     // snapshots
     firmName: text('firm_name').notNull().default(''),
@@ -238,4 +271,5 @@ export type TimeEntry = typeof timeEntries.$inferSelect;
 export type EntrySegment = typeof entrySegments.$inferSelect;
 export type Settings = typeof settings.$inferSelect;
 export type Invoice = typeof invoices.$inferSelect;
+export type AppUser = typeof appUsers.$inferSelect;
 export type InvoiceLine = typeof invoiceLines.$inferSelect;

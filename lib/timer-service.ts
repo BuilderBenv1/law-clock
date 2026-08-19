@@ -77,6 +77,8 @@ export interface StartArgs {
   projectId: string;
   /** Free text; doubles as the task name so history stays groupable. */
   title: string;
+  /** Who is logging this (session email); shown when several people track. */
+  userEmail?: string | null;
   at?: number;
 }
 
@@ -105,6 +107,7 @@ export async function startSession(args: StartArgs): Promise<{ id: string; stopp
     durationMs: 0,
     status: 'running',
     billable: 1,
+    userEmail: args.userEmail ?? null,
   });
   await db.insert(entrySegments).values({ entryId: id, startMs: at, endMs: null });
   return { id, stoppedProjects };
@@ -233,6 +236,36 @@ export async function segmentsForEntries(entryIds: string[]): Promise<Map<string
     out.set(r.entryId, list);
   }
   return out;
+}
+
+/**
+ * Throw away the live sitting without losing the session's history. On a
+ * never-paused session that deletes the whole entry; on a resumed one it only
+ * drops the open segment and re-closes the session — so "the timer ran all
+ * night" never wipes out yesterday's real work.
+ */
+export async function discardLiveSitting(entryId: string): Promise<void> {
+  const db = getDb();
+  const [entry] = await db.select().from(timeEntries).where(eq(timeEntries.id, entryId));
+  if (!entry) return;
+  const open = await db
+    .select()
+    .from(entrySegments)
+    .where(and(eq(entrySegments.entryId, entryId), isNull(entrySegments.endMs)));
+  for (const seg of open) {
+    await db.delete(entrySegments).where(eq(entrySegments.id, seg.id));
+  }
+  const closed = await db.select().from(entrySegments).where(eq(entrySegments.entryId, entryId));
+  if (closed.length === 0) {
+    await db.delete(timeEntries).where(eq(timeEntries.id, entryId));
+    return;
+  }
+  const total = workedMs(closed);
+  const lastEnd = Math.max(...closed.map((c) => c.endMs ?? c.startMs));
+  await db
+    .update(timeEntries)
+    .set({ status: 'stopped', endMs: lastEnd, durationMs: total })
+    .where(eq(timeEntries.id, entryId));
 }
 
 /** Toggle whether an entry is charged to the client. */

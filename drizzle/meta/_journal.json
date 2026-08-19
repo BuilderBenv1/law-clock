@@ -22,6 +22,13 @@
       "when": 1787083369219,
       "tag": "0002_v2_segments_pause_unbilled",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787124065151,
+      "tag": "0003_v3_money_portal_users",
+      "breakpoints": true
     }
   ]
 }
