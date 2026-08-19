@@ -19,10 +19,17 @@ export interface MailArgs {
  *   Resend — set RESEND_API_KEY (+ EMAIL_FROM on a verified domain).
  *
  * Gmail wins when both are configured, since it's the firm's real address.
+ *
+ * From vs Reply-To: automated mail is best sent from a no-reply style address
+ * (EMAIL_FROM, e.g. noreply@iluzlaw.com) with EMAIL_REPLY_TO pointing at a real
+ * mailbox, so a client who hits reply still reaches the firm. With Gmail, the
+ * From address must be registered as a "Send mail as" alias of the
+ * authenticating account, or Google silently rewrites it back.
  */
 export async function sendMail(args: MailArgs): Promise<void> {
   const gmailUser = process.env.GMAIL_USER;
   const gmailPass = process.env.GMAIL_APP_PASSWORD;
+  const replyTo = process.env.EMAIL_REPLY_TO || undefined;
 
   if (gmailUser && gmailPass) {
     const transport = nodemailer.createTransport({
@@ -34,6 +41,7 @@ export async function sendMail(args: MailArgs): Promise<void> {
     await transport.sendMail({
       from: process.env.EMAIL_FROM || gmailUser,
       to: args.to,
+      replyTo,
       subject: args.subject,
       html: args.html,
       attachments: args.attachments,
@@ -51,6 +59,7 @@ export async function sendMail(args: MailArgs): Promise<void> {
   const { error } = await resend.emails.send({
     from: process.env.EMAIL_FROM || 'onboarding@resend.dev',
     to: args.to,
+    replyTo,
     subject: args.subject,
     html: args.html,
     attachments: args.attachments,
